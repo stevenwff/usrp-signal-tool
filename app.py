@@ -3,7 +3,7 @@ import sys
 import threading
 import time
 import numpy as np
-import subprocess  # 新增：用于调用C程序
+import subprocess
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
 import uhd
@@ -20,7 +20,7 @@ RECORD_FOLDER = 'records'
 os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RECORD_FOLDER, exist_ok=True)
 
-# C程序路径（新增）
+# C程序路径
 RX_C_PROGRAM = "/usr/lib/uhd/examples/rx_samples_to_file"
 TX_C_PROGRAM = "/usr/lib/uhd/examples/tx_samples_from_file"
 
@@ -30,7 +30,7 @@ DEFAULT_SAMPLE_RATE = 7000000  # 7 MHz
 DEFAULT_GAIN = 30.0
 DEFAULT_CHANNEL = 0
 
-# 发送配置 - 参考UHD官方示例
+# 发送配置
 MAX_SAMPLES_PER_PACKET = 32768  # 每包最大样本数
 NUM_BUFFERS = 16  # 缓冲区数量
 PACKET_SIZE = MAX_SAMPLES_PER_PACKET * 4  # 每包字节数
@@ -47,16 +47,23 @@ app_state = {
     'transmit_thread': None,
     'stop_event': threading.Event(),
     'transmission_progress': 0,
-    'record_process': None,  # 新增：记录C程序进程
-    'transmit_process': None  # 新增：发送C程序进程
+    'record_process': None,
+    'transmit_process': None,
+    'transmission_time': {  # 新增：时间跟踪状态
+        'elapsed': 0,
+        'total': 0,
+        'sent_samples': 0
+    },
+    'transmission_timer': None,  # 计时器线程
+    'transmission_start_time': 0  # 发送开始时间
 }
 
 # 设备地址模式
 common_addresses = [
-    "type=bladerf",  # 默认地址
+    " ",  # 默认地址
 ]
 
-# 设备发现（保持不变）
+# 设备发现
 def discover_devices():
     devices = []
     tested_addrs = set()
@@ -105,7 +112,7 @@ def discover_devices():
     
     return devices
 
-# 保存IQ数据（保持不变，不被调用）
+# 保存IQ数据
 def save_iq_data(samples, filename, chunk_size=1048576):
     if not filename.endswith(('.iq', '.bin', '.dat')):
         filename += '.iq'
@@ -135,7 +142,7 @@ def save_iq_data(samples, filename, chunk_size=1048576):
     app.logger.info(f"已将 {total_samples} 个样本保存为INT16格式IQ数据，文件大小: {os.path.getsize(full_path)} 字节")
     return full_path
 
-# 原有录制线程函数（保留，不被调用）
+# 原有录制线程函数
 def record_thread_func(params):
     try:
         usrp_args = params['device_id'] if params['device_id'] else ""
@@ -215,7 +222,7 @@ def record_thread_func(params):
         app_state['stop_event'].clear()
         app_state['record_thread'] = None
 
-# 新增：调用C程序的录制线程函数
+# 调用C程序的录制线程函数
 def c_record_thread_func(params):
     try:
         # 构建输出文件路径
@@ -270,7 +277,7 @@ def c_record_thread_func(params):
         app_state['record_thread'] = None
         app_state['record_process'] = None
 
-# 原有发送线程函数（保留，不被调用）
+# 原有发送线程函数
 def transmit_thread_func(params):
     app_state['transmission_progress'] = 0
     
@@ -456,15 +463,21 @@ def transmit_thread_func(params):
         app_state['transmit_thread'] = None
         app_state['transmission_progress'] = 0
 
-# 新增：调用C程序的发送线程函数
+# 调用C程序的发送线程函数（带时间计算）
 def c_transmit_thread_func(params):
     app_state['transmission_progress'] = 0
+    # 初始化时间跟踪
+    app_state['transmission_time'] = {
+        'elapsed': 0,
+        'total': 0,
+        'sent_samples': 0
+    }
     
     try:
         filename = params['filename']
         full_path = None
         
-        # 查找文件（与原有逻辑一致）
+        # 查找文件
         possible_paths = [
             os.path.join(RECORD_FOLDER, filename),
             os.path.join(UPLOAD_FOLDER, filename)
@@ -487,7 +500,14 @@ def c_transmit_thread_func(params):
             app.logger.error(f"文件未找到: {filename}")
             return
         
-        # 构建C程序命令参数
+ # 获取文件信息和计算总时长
+        file_size = os.path.getsize(full_path)
+        total_samples = file_size // 4
+        sample_rate = params.get('sample_rate', DEFAULT_SAMPLE_RATE)
+        total_duration = total_samples / sample_rate  # 总时长（秒）
+        app_state['transmission_time']['total'] = total_duration
+        
+        # 构建C程序命令参数（保持不变）
         args = [
             TX_C_PROGRAM,
             f"--args={params['device_id'] or ''}",
@@ -498,9 +518,31 @@ def c_transmit_thread_func(params):
             f"--file={full_path}"
         ]
         
-        app.logger.info(f"启动C发送程序: {' '.join(args)}")
+        # 记录发送开始时间
+        app_state['transmission_start_time'] = time.time()
         
-        # 启动C程序进程
+        # 启动定时更新进度的线程
+        def update_progress_periodically():
+            # 每秒更新一次进度
+            while app_state['transmitting'] and not app_state['stop_event'].is_set():
+                elapsed = time.time() - app_state['transmission_start_time']
+                # 计算进度（不超过100%）
+                if total_duration > 0:
+                    progress = min(100, (elapsed / total_duration) * 100)
+                    app_state['transmission_progress'] = progress
+                    app_state['transmission_time']['elapsed'] = elapsed
+                    app_state['transmission_time']['sent_samples'] = min(
+                        total_samples, int((elapsed / total_duration) * total_samples)
+                    )
+                # 等待1秒
+                time.sleep(1)
+        
+        # 启动进度更新线程
+        app_state['transmission_timer'] = threading.Thread(target=update_progress_periodically)
+        app_state['transmission_timer'].daemon = True
+        app_state['transmission_timer'].start()
+        
+        # 启动C程序进程（保持不变）
         app_state['transmit_process'] = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
@@ -508,67 +550,40 @@ def c_transmit_thread_func(params):
             text=True
         )
         
-        # 获取文件总大小用于计算进度
-        file_size = os.path.getsize(full_path)
-        total_samples = file_size // 4
-        last_progress = 0
-        
-        # 实时读取输出并估算进度
+        # 读取C程序输出（保持不变）
         for line in app_state['transmit_process'].stdout:
             app.logger.info(f"TX_C: {line.strip()}")
-            
-            # 尝试从输出中提取已发送样本数（假设C程序会输出类似"Sent X samples"的日志）
-            if "Sent" in line and "samples" in line:
-                try:
-                    sent_samples = int(line.split()[1])
-                    progress = min(100, int((sent_samples / total_samples) * 100))
-                    if progress != last_progress:
-                        app_state['transmission_progress'] = progress
-                        last_progress = progress
-                except (IndexError, ValueError):
-                    pass
-                    
             if app_state['stop_event'].is_set():
                 break
         
         # 等待进程结束
         app_state['transmit_process'].wait()
         
+        # 发送完成处理
         if app_state['transmit_process'].returncode == 0:
             app.logger.info(f"C程序发送完成，文件: {full_path}")
+            # 强制进度为100%
             app_state['transmission_progress'] = 100
+            app_state['transmission_time']['elapsed'] = time.time() - app_state['transmission_start_time']
+            app_state['transmission_time']['sent_samples'] = total_samples
         else:
             app.logger.error(f"C程序发送失败，返回码: {app_state['transmit_process'].returncode}")
                 
     except Exception as e:
         app.logger.error(f"C程序发送错误: {str(e)}")
     finally:
+        # 清理计时器线程
+        if app_state['transmission_timer']:
+            app_state['transmission_timer'] = None
         app_state['transmitting'] = False
         app_state['stop_event'].clear()
         app_state['transmit_thread'] = None
         app_state['transmit_process'] = None
-        app_state['transmission_progress'] = 0
 
-# 获取发送进度（保持不变）
-@app.route('/api/transmission-progress')
-def get_transmission_progress():
-    return jsonify({
-        'progress': app_state['transmission_progress']
-    })
-
-# 路由定义（仅修改启动录制/发送的路由）
+# API 路由
 @app.route('/')
 def index():
     return render_template('index.html')
-
-@app.route('/api/default-params')
-def get_default_params():
-    return jsonify({
-        'frequency': DEFAULT_FREQUENCY,
-        'sample_rate': DEFAULT_SAMPLE_RATE,
-        'gain': DEFAULT_GAIN,
-        'channel': DEFAULT_CHANNEL
-    })
 
 @app.route('/api/devices')
 def get_devices():
@@ -582,184 +597,80 @@ def get_devices():
 def select_device():
     data = request.json
     device_id = data.get('device_id')
-    
-    devices = discover_devices()
-    device_ids = [d['id'] for d in devices]
-    
-    if device_id in device_ids:
-        app_state['selected_device'] = device_id
-        return jsonify({
-            'status': 'success',
-            'selected': device_id
-        })
-    else:
-        return jsonify({
-            'status': 'error',
-            'message': '设备未找到'
-        }), 404
+    app_state['selected_device'] = device_id
+    return jsonify({
+        'status': 'success',
+        'selected': device_id
+    })
 
 @app.route('/api/status')
 def get_status():
     return jsonify({
         'recording': app_state['recording'],
         'transmitting': app_state['transmitting'],
-        'selected_device': app_state['selected_device']
+        'selected_device': app_state['selected_device'],
+        'transmission_progress': app_state['transmission_progress']
     })
 
-@app.route('/api/start-recording', methods=['POST'])
-def start_recording():
-    if app_state['recording'] or app_state['transmitting']:
-        return jsonify({
-            'status': 'error',
-            'message': '有其他操作正在进行'
-        })
-    
-    if not app_state['selected_device']:
-        return jsonify({
-            'status': 'error',
-            'message': '未选择设备'
-        })
-    
-    data = request.json
-    
-    try:
-        params = {
-            'filename': data['filename'],
-            'frequency': float(data.get('frequency', DEFAULT_FREQUENCY)),
-            'duration': float(data['duration']),
-            'sample_rate': int(data.get('sample_rate', DEFAULT_SAMPLE_RATE)),
-            'gain': float(data.get('gain', DEFAULT_GAIN)),
-            'channel': int(data.get('channel', DEFAULT_CHANNEL)),
-            'device_id': app_state['selected_device']
-        }
-        
-        # 重置停止事件
-        app_state['stop_event'].clear()
-        # 使用C程序线程（替换原有Python线程）
-        app_state['record_thread'] = threading.Thread(
-            target=c_record_thread_func,
-            args=(params,)
-        )
-        app_state['recording'] = True
-        app_state['record_thread'].start()
-        
-        return jsonify({
-            'status': 'success',
-            'message': '开始录制'
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+# 新增：发送时间进度API
+@app.route('/api/transmission-time')
+def get_transmission_time():
+    return jsonify({
+        'elapsed': app_state['transmission_time'].get('elapsed', 0),
+        'total': app_state['transmission_time'].get('total', 0),
+        'sent_samples': app_state['transmission_time'].get('sent_samples', 0),
+        'progress': app_state['transmission_progress']
+    })
 
 @app.route('/api/stop-recording', methods=['POST'])
 def stop_recording():
-    if not app_state['recording']:
-        return jsonify({
-            'status': 'error',
-            'message': '未在录制'
-        })
-    
-    # 停止C程序进程（新增）
+    app_state['stop_event'].set()
     if app_state['record_process']:
         try:
             app_state['record_process'].terminate()
-            app_state['record_process'].wait(timeout=5)
-            app.logger.info("C录制程序已终止")
-        except subprocess.TimeoutExpired:
-            app_state['record_process'].kill()
-            app.logger.warning("强制终止C录制程序")
-    
-    app_state['stop_event'].set()
-    return jsonify({
-        'status': 'success',
-        'message': '停止录制'
-    })
+        except Exception as e:
+            app.logger.error(f"Error terminating record process: {str(e)}")
+    return jsonify({'status': 'success', 'message': 'Recording stopped'})
 
 @app.route('/api/start-transmission', methods=['POST'])
 def start_transmission():
     if app_state['transmitting'] or app_state['recording']:
-        return jsonify({
-            'status': 'error',
-            'message': '有其他操作正在进行'
-        })
-    
-    if not app_state['selected_device']:
-        return jsonify({
-            'status': 'error',
-            'message': '未选择设备'
-        })
+        return jsonify({'status': 'error', 'message': 'Already transmitting or recording'})
     
     data = request.json
-    filename = data.get('filename')
+    app_state['transmitting'] = True
+    app_state['stop_event'].clear()
+    app_state['transmission_progress'] = 0
     
-    if not filename:
-        return jsonify({
-            'status': 'error',
-            'message': '未指定文件名'
-        })
+    params = {
+        'device_id': app_state['selected_device'],
+        'filename': data.get('filename'),
+        'frequency': data.get('frequency', DEFAULT_FREQUENCY),
+        'sample_rate': data.get('sample_rate', DEFAULT_SAMPLE_RATE),
+        'gain': data.get('gain', DEFAULT_GAIN),
+        'channel': data.get('channel', DEFAULT_CHANNEL)
+    }
     
-    try:
-        params = {
-            'filename': filename,
-            'frequency': float(data.get('frequency', DEFAULT_FREQUENCY)),
-            'sample_rate': int(data.get('sample_rate', DEFAULT_SAMPLE_RATE)),
-            'gain': float(data.get('gain', DEFAULT_GAIN)),
-            'channel': int(data.get('channel', DEFAULT_CHANNEL)),
-            'device_id': app_state['selected_device']
-        }
-        
-        app_state['stop_event'].clear()
-        # 使用C程序线程（替换原有Python线程）
-        app_state['transmit_thread'] = threading.Thread(
-            target=c_transmit_thread_func,
-            args=(params,)
-        )
-        app_state['transmitting'] = True
-        app_state['transmit_thread'].start()
-        
-        return jsonify({
-            'status': 'success',
-            'message': '开始发送'
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
+    # 使用C程序进行发送
+    app_state['transmit_thread'] = threading.Thread(target=c_transmit_thread_func, args=(params,))
+    app_state['transmit_thread'].start()
+    
+    return jsonify({'status': 'success', 'message': 'Transmission started'})
 
 @app.route('/api/stop-transmission', methods=['POST'])
 def stop_transmission():
-    if not app_state['transmitting']:
-        return jsonify({
-            'status': 'error',
-            'message': '未在发送'
-        })
-    
-    # 停止C程序进程（新增）
+    app_state['stop_event'].set()
     if app_state['transmit_process']:
         try:
             app_state['transmit_process'].terminate()
-            app_state['transmit_process'].wait(timeout=5)
-            app.logger.info("C发送程序已终止")
-        except subprocess.TimeoutExpired:
-            app_state['transmit_process'].kill()
-            app.logger.warning("强制终止C发送程序")
-    
-    app_state['stop_event'].set()
-    return jsonify({
-        'status': 'success',
-        'message': '停止发送'
-    })
-
-# 其他路由保持不变（省略，与原代码一致）
+        except Exception as e:
+            app.logger.error(f"Error terminating transmit process: {str(e)}")
+    return jsonify({'status': 'success', 'message': 'Transmission stopped'})
 
 @app.route('/api/files')
 def get_files():
     uploads = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
     records = [f for f in os.listdir(RECORD_FOLDER) if os.path.isfile(os.path.join(RECORD_FOLDER, f))]
-    
     return jsonify({
         'uploads': uploads,
         'records': records
@@ -768,117 +679,135 @@ def get_files():
 @app.route('/api/upload', methods=['POST'])
 def upload_file():
     if 'file' not in request.files:
-        return jsonify({'status': 'error', 'message': '没有文件部分'})
+        return jsonify({'status': 'error', 'message': 'No file part'})
     
     file = request.files['file']
     if file.filename == '':
-        return jsonify({'status': 'error', 'message': '未选择文件'})
+        return jsonify({'status': 'error', 'message': 'No selected file'})
     
     if file:
         filename = file.filename
-        filename = os.path.basename(filename)
-        if not any(filename.endswith(ext) for ext in ('.iq', '.bin', '.dat')):
-            filename += '.iq'
-        
         filepath = os.path.join(UPLOAD_FOLDER, filename)
         file.save(filepath)
-        
-        # 验证上传文件是否为INT16格式
-        file_size = os.path.getsize(filepath)
-        if file_size % 4 != 0:
-            app.logger.warning(f"上传的文件可能不是INT16 IQ格式 (大小: {file_size} 字节，不是4的倍数)")
-        
         return jsonify({'status': 'success', 'filename': filename})
     
-    return jsonify({'status': 'error', 'message': '文件上传失败'})
+    return jsonify({'status': 'error', 'message': 'File upload failed'})
 
 @app.route('/api/delete-file/<folder>/<filename>', methods=['DELETE'])
 def delete_file(folder, filename):
     if folder not in ['uploads', 'records']:
-        return jsonify({'status': 'error', 'message': '无效的文件夹'})
+        return jsonify({'status': 'error', 'message': 'Invalid folder'})
     
     folder_path = UPLOAD_FOLDER if folder == 'uploads' else RECORD_FOLDER
     filepath = os.path.join(folder_path, filename)
     
     if os.path.exists(filepath) and os.path.isfile(filepath):
-        try:
-            os.remove(filepath)
-            return jsonify({'status': 'success', 'message': f'文件 {filename} 已删除'})
-        except Exception as e:
-            return jsonify({'status': 'error', 'message': f'删除文件失败: {str(e)}'})
-    else:
-        return jsonify({'status': 'error', 'message': '文件未找到'})
+        os.remove(filepath)
+        return jsonify({'status': 'success', 'message': 'File deleted'})
+    
+    return jsonify({'status': 'error', 'message': 'File not found'})
 
 @app.route('/download/<folder>/<filename>')
 def download_file(folder, filename):
     if folder not in ['uploads', 'records']:
-        return jsonify({'status': 'error', 'message': '无效的文件夹'}), 404
+        return jsonify({'status': 'error', 'message': 'Invalid folder'}), 400
     
     folder_path = UPLOAD_FOLDER if folder == 'uploads' else RECORD_FOLDER
     return send_from_directory(folder_path, filename, as_attachment=True)
 
-def check_storage_space(min_required_mb=100):
-    """检查存储目录的可用空间，返回是否足够和详细信息"""
-    # 获取存储目录的磁盘信息
-    disk_stats = shutil.disk_usage(RECORD_FOLDER)
+@app.route('/api/storage-status')
+def get_storage_status():
+    disk = shutil.disk_usage('/')
+    total_mb = disk.total // (1024 * 1024)
+    used_mb = disk.used // (1024 * 1024)
+    available_mb = disk.free // (1024 * 1024)
     
-    # 计算可用空间（MB）
-    available_mb = disk_stats.free / (1024 **2)
+    # 估算所需空间（基于最大可能录制时长和采样率）
+    max_duration = 5  # 1小时
+    max_sample_rate = 15.36e6  # 20 MS/s
+    bytes_per_second = max_sample_rate * 4  # 每个样本4字节（IQ各16位）
+    required_mb = (bytes_per_second * max_duration) // (1024 * 1024)
     
-    # 检查是否满足最小需求
-    is_enough = available_mb >= min_required_mb
+    enough = available_mb > required_mb * 1.2  # 留出20%余量
     
-    return {
-        'enough': is_enough,
-        'available_mb': round(available_mb, 2),
-        'required_mb': min_required_mb,
-        'total_mb': round(disk_stats.total / (1024** 2), 2),
-        'used_mb': round(disk_stats.used / (1024 **2), 2)
-    }
+    return jsonify({
+        'total_mb': total_mb,
+        'used_mb': used_mb,
+        'available_mb': available_mb,
+        'required_mb': required_mb,
+        'enough': enough
+    })
 
-# 修改录制API，添加存储空间检查
-@app.route('/api/start-record', methods=['POST'])
-def start_record():
+
+# 添加存储检查接口
+@app.route('/api/check-storage', methods=['POST'])
+def check_storage():
+    data = request.json
+    required_mb = float(data.get('required_mb', 0))
+    
+    # 获取存储路径的磁盘信息
+    disk = shutil.disk_usage(RECORD_FOLDER)
+    
+    # 计算可用空间 (MB)
+    available_mb = disk.free / (1024 * 1024)
+    # 至少保留1GB (1024MB) 空间
+    required_reserve_mb = 1024
+    # 实际可用空间 = 总可用空间 - 必须保留的1GB
+    actual_available_mb = available_mb - required_reserve_mb
+    
+    # 检查是否足够
+    enough = actual_available_mb >= required_mb
+    
+    return jsonify({
+        'enough': enough,
+        'required_mb': required_mb,
+        'available_mb': available_mb,
+        'actual_available_mb': actual_available_mb,
+        'required_reserve_mb': required_reserve_mb
+    })
+
+# 增强录制接口的存储检查（双重保险）
+@app.route('/api/start-recording', methods=['POST'])
+def start_recording():
     if app_state['recording'] or app_state['transmitting']:
-        return jsonify({'success': False, 'message': 'Recording or transmission in progress'})
+        return jsonify({'success': False, 'message': 'Device is busy'})
     
     if not app_state['selected_device']:
         return jsonify({'success': False, 'message': 'No device selected'})
     
-    # 新增：录制前检查存储空间
-    # 计算所需空间：采样率 * 时长 * 每个样本大小(4字节) / 1024^2
-    try:
-        sample_rate = int(request.json.get('sample_rate', DEFAULT_SAMPLE_RATE))
-        duration = float(request.json.get('duration', DEFAULT_DURATION))
-        # 每个复数样本包含2个int16值，共4字节
-        required_space_mb = (sample_rate * duration * 4) / (1024** 2)
-        # 增加20%的安全余量
-        required_space_mb *= 1.2
-        
-        storage_check = check_storage_space(required_space_mb)
-        if not storage_check['enough']:
-            return jsonify({
-                'success': False, 
-                'message': f'存储空间不足！需要至少 {required_space_mb:.2f} MB，仅可用 {storage_check["available_mb"]} MB'
-            })
-    except Exception as e:
-        app.logger.error(f"存储空间检查失败: {str(e)}")
-        return jsonify({'success': False, 'message': '检查存储空间时发生错误'})
+    data = request.json
     
-    # ... 其余原有录制逻辑 ...
-
-# 新增：获取存储空间状态的API
-@app.route('/api/storage-status')
-def get_storage_status():
-    try:
-        status = check_storage_space()
-        return jsonify(status)
-    except Exception as e:
-        app.logger.error(f"获取存储状态失败: {str(e)}")
-        return jsonify({'error': str(e)}), 500
-
+    # 计算所需空间
+    duration = float(data.get('duration', 0))
+    sample_rate = int(data.get('sample_rate', 0))
+    required_mb = (duration * sample_rate * 8) / (1024 * 1024)  # 8字节/样本
+    
+    # 检查存储（双重保险）
+    disk = shutil.disk_usage(RECORD_FOLDER)
+    available_mb = disk.free / (1024 * 1024)
+    if available_mb - 1024 < required_mb:  # 保留1GB
+        return jsonify({
+            'success': False,
+            'message': f'存储空间不足！需要 {required_mb:.2f} MB，可用 {available_mb:.2f} MB（需保留1GB）'
+        })
+    
+    # 原有录制逻辑...
+    params = {
+        'device_id': app_state['selected_device'],
+        'filename': data.get('filename', f'record_{int(time.time())}'),
+        'frequency': float(data.get('frequency', DEFAULT_FREQUENCY)),
+        'duration': float(data.get('duration', 5)),
+        'sample_rate': int(data.get('sample_rate', DEFAULT_SAMPLE_RATE)),
+        'gain': float(data.get('gain', DEFAULT_GAIN)),
+        'channel': int(data.get('channel', DEFAULT_CHANNEL))
+    }
+    
+    app_state['recording'] = True
+    app_state['stop_event'].clear()
+    app_state['record_thread'] = threading.Thread(target=c_record_thread_func, args=(params,))
+    app_state['record_thread'].start()
+    
+    return jsonify({'success': True, 'message': 'Recording started'})    
 
 if __name__ == '__main__':
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.makedirs(RECORD_FOLDER, exist_ok=True)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+    app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
