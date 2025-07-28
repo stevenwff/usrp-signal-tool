@@ -147,6 +147,7 @@
                                     <div class="param-group">
                                         <label for="record-duration" class="form-label">Duration (seconds)</label>
                                         <input type="number" class="form-control" id="record-duration" value="5" min="1" step="1" required>
+                                        <small id="record-size-hint" class="form-text text-muted">预估文件大小: 0 MB</small>
                                     </div>
                                 </div>
                                 <div class="col-md-6">
@@ -222,6 +223,15 @@
                                     </div>
                                 </div>
                             </div>
+                            <!-- 发送进度显示区域 -->
+                            <div id="transmit-progress-container" class="mt-4" style="display: none;">
+                                <div class="w-100 bg-gray-200 rounded-full h-2.5">
+                                    <div id="transmit-progress-bar" class="bg-warning h-2.5 rounded-full" style="width: 0%"></div>
+                                </div>
+                                <div class="mt-1 text-sm text-muted">
+                                    <span id="transmit-time-details">已发送: 00:00 / 00:00</span>
+                                </div>
+                            </div>
                             <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
                                 <button type="button" id="start-transmit" class="btn btn-warning text-dark">
                                     <i class="bi bi-play"></i> Start Transmission
@@ -249,8 +259,20 @@
                                 <input type="file" class="form-control" id="file-upload" accept=".iq,.bin,.dat">
                                 <button class="btn btn-primary" type="button" id="upload-button">Upload</button>
                             </div>
-                            <div id="upload-status" class="mt-2 text-muted"></div>
-                        </div>
+                            <!-- 进度显示区域 -->
+                            <div id="upload-status-container" class="mt-4 hidden">
+                                <p id="upload-status" class="text-gray-700"></p>
+                                
+                                <div class="w-full bg-gray-200 rounded-full h-2.5 mt-2">
+                                    <div id="upload-progress" class="bg-blue-500 h-2.5 rounded-full" style="width: 0%"></div>
+                                </div>
+                                
+                                <div class="flex justify-between text-sm text-gray-500 mt-1">
+                                    <span id="upload-percentage">0%</span>
+                                    <span id="upload-details"> 0 MB / 0 MB</span>
+                                </div>
+                            </div>
+                        </div>                   
 
                         <!-- Uploaded Files -->
                         <div class="mb-5">
@@ -298,6 +320,9 @@
             // 定期检查状态
             setInterval(checkStatus, 1000);
             
+            // 添加发送进度检查定时器
+            setInterval(getTransmissionProgress, 500);
+            
             document.getElementById('record-filename').value = generateTimestampFilename();
             
             // 设备刷新按钮
@@ -313,12 +338,15 @@
             
             // 文件上传
             document.getElementById('upload-button').addEventListener('click', uploadFile);
+
+            document.getElementById('record-duration').addEventListener('change', updateRecordSizeHint);
+            document.getElementById('record-samplerate').addEventListener('change', updateRecordSizeHint);
             
             // 检查存储状态
             checkStorageStatus();
+            updateRecordSizeHint(); // 添加这行
             // 每30秒检查一次存储状态
             setInterval(checkStorageStatus, 30000);            
-            
         });
 
         // 刷新设备列表
@@ -434,6 +462,14 @@
                     document.getElementById('start-transmit').disabled = appState.transmitting || appState.recording || !appState.selectedDevice;
                     document.getElementById('stop-transmit').disabled = !appState.transmitting;
                     
+                    // 控制进度容器显示
+                    const progressContainer = document.getElementById('transmit-progress-container');
+                    if (appState.transmitting) {
+                        progressContainer.style.display = 'block';
+                    } else {
+                        progressContainer.style.display = 'none';
+                    }
+                    
                     // 关键逻辑：当录制状态从true变为false时（录制完成），刷新文件名
                     if (wasRecording && !appState.recording) {
                         document.getElementById('record-filename').value = generateTimestampFilename();
@@ -444,8 +480,47 @@
                     if (!appState.recording && !appState.transmitting) {
                         refreshFileLists();
                     }
+                    
+                    updateButtonStates();
                 })
                 .catch(error => console.error('Error checking status:', error));
+        }
+
+        // 发送进度获取函数
+        function getTransmissionProgress() {
+            if (!appState.transmitting) return;
+            
+            fetch('/api/transmission-time')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.progress !== undefined) {
+                        // 更新进度条
+                        const progressBar = document.getElementById('transmit-progress-bar');
+                        // const progressPercentage = document.getElementById('transmit-progress-percentage');
+                        const timeDetails = document.getElementById('transmit-time-details');
+                        const progressContainer = document.getElementById('transmit-progress-container');
+                        
+                        // 显示进度容器
+                        progressContainer.style.display = 'block';
+                        
+                        // 更新进度数据
+                        progressBar.style.width = `${data.progress}%`;
+                        // progressPercentage.textContent = `${data.progress}%`;
+                        
+                        // 格式化时间（转换为分:秒）
+                        const formatTime = (seconds) => {
+                            const mins = Math.floor(seconds / 60);
+                            const secs = Math.floor(seconds % 60);
+                            return `${mins.toString().padStart(2, '0')}:${secs.toString().padStart(2, '0')}`;
+                        };
+                        
+                        // 更新时间显示
+                        const elapsedTime = data.elapsed || 0;
+                        const totalTime = data.total || 0;
+                        timeDetails.textContent = `已发送: ${formatTime(elapsedTime)} / ${formatTime(totalTime)}`;
+                    }
+                })
+                .catch(error => console.error('Error fetching transmission progress:', error));
         }
 
         // 开始录制
@@ -454,51 +529,48 @@
                 alert('Please select a device first');
                 return;
             }
-            
-            const recordData = {
-                filename: document.getElementById('record-filename').value,
-                frequency: parseFloat(document.getElementById('record-frequency').value),
-                duration: parseFloat(document.getElementById('record-duration').value),
-                sample_rate: parseInt(document.getElementById('record-samplerate').value),
-                gain: parseFloat(document.getElementById('record-gain').value),
-                channel: parseInt(document.getElementById('record-channel').value)
-            };
-            
-            fetch('/api/start-recording', {
+
+            // 计算所需空间
+            const requiredMB = calculateRecordSize();
+            // 检查存储空间
+            fetch('/api/check-storage', {
                 method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(recordData)
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ required_mb: requiredMB })
             })
             .then(response => response.json())
             .then(data => {
-                if (data.status === 'error') {
-                    alert(data.message);
+                if (!data.enough) {
+                    alert(`存储空间不足！\n需要: ${requiredMB.toFixed(2)} MB\n可用: ${data.available_mb.toFixed(2)} MB\n至少需要保留1GB空闲空间`);
+                    return;
                 }
-            })
-            
-            fetch('/api/start-record', {
-                method: 'POST',
-                headers: {
-                    'Content-Type': 'application/json'
-                },
-                body: JSON.stringify(params)
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.success) {
-                    showNotification('录制已开始', 'success');
-                } else {
-                    // 显示错误信息，包括存储不足的情况
-                    showNotification(data.message, 'danger');
-                }
-            })
-            .catch(error => {
-                showNotification('启动录制失败', 'danger');
-                console.error('Error starting recording:', error);
-            });            
+
+                // 空间足够，继续录制流程
+                const recordData = {
+                    filename: document.getElementById('record-filename').value,
+                    frequency: parseFloat(document.getElementById('record-frequency').value),
+                    duration: parseFloat(document.getElementById('record-duration').value),
+                    sample_rate: parseInt(document.getElementById('record-samplerate').value),
+                    gain: parseFloat(document.getElementById('record-gain').value),
+                    channel: parseInt(document.getElementById('record-channel').value)
+                };
+
+                fetch('/api/start-recording', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(recordData)
+                })
+                .then(response => response.json())
+                .then(data => {
+                    if (data.success) {
+                        showNotification('录制已开始', 'success');
+                    } else {
+                        showNotification(data.message, 'danger');
+                    }
+                });
+            });
         }
+
 
         // 停止录制
         function stopRecording() {
@@ -643,11 +715,15 @@
             }
         });
 
-        // 上传文件
         function uploadFile() {
             const fileInput = document.getElementById('file-upload');
+            const statusContainer = document.getElementById('upload-status-container');
             const uploadStatus = document.getElementById('upload-status');
+            const uploadProgress = document.getElementById('upload-progress');
+            const uploadPercentage = document.getElementById('upload-percentage');
+            const uploadDetails = document.getElementById('upload-details');
             
+            // 检查文件选择
             if (!fileInput.files || fileInput.files.length === 0) {
                 uploadStatus.textContent = 'Please select a file first';
                 uploadStatus.className = 'mt-2 text-danger';
@@ -658,38 +734,69 @@
             const formData = new FormData();
             formData.append('file', file);
             
+            // 显示上传状态区域
+            statusContainer.classList.remove('hidden');
             uploadStatus.textContent = 'Uploading...';
             uploadStatus.className = 'mt-2 text-info';
+            uploadProgress.style.width = '0%';
+            uploadProgress.style.backgroundColor = '#3b82f6'; // 重置为蓝色
             
-            fetch('/api/upload', {
-                method: 'POST',
-                body: formData
-            })
-            .then(response => response.json())
-            .then(data => {
-                if (data.status === 'success') {
-                    uploadStatus.textContent = `File ${data.filename} uploaded successfully`;
-                    uploadStatus.className = 'mt-2 text-success';
-                    // 清空文件输入
-                    fileInput.value = '';
-                    // 刷新文件列表
-                    refreshFileLists();
+            // 使用XHR替代fetch以获取进度
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/upload', true);
+            
+            // 上传进度处理
+            xhr.upload.addEventListener('progress', function(e) {
+                if (e.lengthComputable) {
+                    const percentComplete = (e.loaded / e.total) * 100;
+                    uploadProgress.style.width = percentComplete + '%';
+                    uploadPercentage.textContent = percentComplete.toFixed(1) + '%';
+                    
+                    // 格式化文件大小
+                    const uploadedMB = (e.loaded / (1024 * 1024)).toFixed(2);
+                    const totalMB = (e.total / (1024 * 1024)).toFixed(2);
+                    uploadDetails.textContent = `${uploadedMB} MB / ${totalMB} MB`;
+                }
+            });
+            
+            // 上传完成处理
+            xhr.addEventListener('load', function() {
+                if (xhr.status >= 200 && xhr.status < 300) {
+                    try {
+                        const response = JSON.parse(xhr.responseText);
+                        if (response.status === 'success') {
+                            uploadStatus.textContent = `File ${response.filename} uploaded successfully`;
+                            uploadStatus.className = 'mt-2 text-success';
+                            uploadProgress.style.backgroundColor = '#10b981'; // 成功时变绿色
+                            fileInput.value = '';
+                            refreshFileLists();
+                        } else {
+                            uploadStatus.textContent = `Error: ${response.message || 'Unknown error'}`;
+                            uploadStatus.className = 'mt-2 text-danger';
+                        }
+                    } catch (e) {
+                        uploadStatus.textContent = 'Upload completed but invalid response received';
+                        uploadStatus.className = 'mt-2 text-warning';
+                    }
                 } else {
-                    uploadStatus.textContent = `Error: ${data.message}`;
+                    uploadStatus.textContent = `Server error: ${xhr.statusText}`;
                     uploadStatus.className = 'mt-2 text-danger';
                 }
-                
-                // 5秒后清除状态消息
-                setTimeout(() => {
-                    uploadStatus.textContent = '';
-                    uploadStatus.className = 'mt-2 text-muted';
-                }, 5000);
-            })
-            .catch(error => {
-                uploadStatus.textContent = 'Upload failed';
-                uploadStatus.className = 'mt-2 text-danger';
-                console.error('Error uploading file:', error);
             });
+            
+            // 错误和中断处理
+            xhr.addEventListener('error', function() {
+                uploadStatus.textContent = 'Upload failed. Please try again.';
+                uploadStatus.className = 'mt-2 text-danger';
+            });
+            
+            xhr.addEventListener('abort', function() {
+                uploadStatus.textContent = 'Upload aborted.';
+                uploadStatus.className = 'mt-2 text-warning';
+            });
+            
+            // 发送请求
+            xhr.send(formData);
         }
 
         // 检查存储状态函数
@@ -733,7 +840,6 @@
         // 修改按钮状态更新函数
         function updateButtonStates() {
             const recordBtn = document.getElementById('start-record');
-            // ... 原有禁用逻辑 ...
             
             // 如果存储空间不足，禁用录制按钮
             if (!appState.storage.enough) {
@@ -742,7 +848,7 @@
             }
         }
         
-        // 新增：通用通知函数
+        // 通用通知函数
         function showNotification(message, type = 'info') {
             // 创建通知元素
             const notification = document.createElement('div');
@@ -777,7 +883,20 @@
             
             // 格式化为YYYYMMDDHHMMSS，增加秒数以确保唯一性
             return `${year}${month}${day}${hours}${minutes}${seconds}`;
-        }        
+        }
+        function calculateRecordSize() {
+            const duration = parseFloat(document.getElementById('record-duration').value) || 0;
+            const sampleRate = parseInt(document.getElementById('record-samplerate').value) || 0;
+            // IQ数据每个样本8字节（2个int16）
+            const sizeMB = (duration * sampleRate * 4) / (1024 * 1024);
+            return sizeMB;
+        }      
+        // 更新预估大小显示
+        function updateRecordSizeHint() {
+            const sizeMB = calculateRecordSize();
+            document.getElementById('record-size-hint').textContent = 
+                `预估文件大小: ${sizeMB.toFixed(2)} MB`;
+        }                  
     </script>
 </body>
 </html>
