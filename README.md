@@ -43,7 +43,7 @@
 ```bash
 # Ubuntu 系统示例
 sudo apt update
-sudo apt install libuhd-dev uhd-host
+sudo apt install libuhd-dev uhd-host python3-uhd
 sudo uhd_images_downloader  # 下载 USRP 固件
 ```
 
@@ -51,7 +51,7 @@ sudo uhd_images_downloader  # 下载 USRP 固件
 
 ```bash
 # 安装依赖包
-pip install flask flask-cors numpy uhd-python shutil
+pip install flask flask-cors numpy pytest-shutil
 ```
 
 ### 运行程序
