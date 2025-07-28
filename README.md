@@ -50,10 +50,6 @@ sudo uhd_images_downloader  # 下载 USRP 固件
 2. **安装 Python 依赖**：
 
 ```bash
-# 创建虚拟环境（可选但推荐）
-python3 -m venv venv
-source venv/bin/activate
-
 # 安装依赖包
 pip install flask flask-cors numpy uhd-python shutil
 ```
