@@ -1,884 +1,783 @@
-import os
-import sys
-import threading
-import time
-import numpy as np
-import subprocess  # 新增：用于调用C程序
-from flask import Flask, render_template, request, jsonify, send_from_directory
-from flask_cors import CORS
-import uhd
-import shutil
-from uhd import usrp
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>USRP Signal Manager</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <style>
+        .status-indicator {
+            width: 15px;
+            height: 15px;
+            border-radius: 50%;
+            display: inline-block;
+        }
+        .status-connected {
+            background-color: #28a745;
+        }
+        .status-recording {
+            background-color: #dc3545;
+            animation: pulse 1.5s infinite;
+        }
+        .status-transmitting {
+            background-color: #ffc107;
+            animation: pulse 1s infinite;
+        }
+        .card {
+            transition: transform 0.2s, box-shadow 0.2s;
+        }
+        .card:hover {
+            transform: translateY(-5px);
+            box-shadow: 0 10px 20px rgba(0,0,0,0.1);
+        }
+        .section-title {
+            border-bottom: 2px solid #0d6efd;
+            padding-bottom: 10px;
+            margin-bottom: 20px;
+        }
+        .param-group {
+            margin-bottom: 15px;
+        }
+        @keyframes pulse {
+            0% { opacity: 1; }
+            50% { opacity: 0.5; }
+            100% { opacity: 1; }
+        }
+        .file-item {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px;
+            border-bottom: 1px solid #eee;
+        }
+        .file-item:last-child {
+            border-bottom: none;
+        }
+        .tab-content {
+            margin-top: 20px;
+        }
+        .spinner {
+            display: inline-block;
+            width: 20px;
+            height: 20px;
+            border: 3px solid rgba(0,0,0,.3);
+            border-radius: 50%;
+            border-top-color: #0d6efd;
+            animation: spin 1s ease-in-out infinite;
+        }
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+        .alert {
+            transition: all 0.3s ease;
+        }
+        .device-info {
+            font-size: 0.9em;
+        }
+    </style>
+</head>
+<body>
+    <div class="container mt-4 mb-5">
+        <header class="mb-5 text-center">
+            <h1>USRP Signal Manager</h1>
+            <p class="text-muted">Control and configure your USRP devices for signal recording and transmission</p>
+            <div id="system-status" class="alert alert-info mt-3">
+                <span id="status-text">Ready</span>
+                <span id="activity-indicator" style="display: none;" class="spinner ms-2"></span>
+            </div>
+        </header>
 
-# 创建Flask应用实例
-app = Flask(__name__)
-CORS(app)
+        <!-- Device Selection Section -->
+        <div class="card mb-5">
+            <div class="card-header bg-primary text-white">
+                <h2 class="h5 mb-0">Connected Devices</h2>
+            </div>
+            <div class="card-body">
+                <div id="device-list" class="list-group">
+                    <div class="d-flex justify-content-center">
+                        <div class="spinner"></div>
+                        <span class="ms-2">Discovering devices...</span>
+                    </div>
+                </div>
+                <button id="refresh-devices" class="btn btn-outline-secondary mt-3">
+                    <i class="bi bi-arrow-clockwise"></i> Refresh Devices
+                </button>
+            </div>
+        </div>
 
-# 配置
-UPLOAD_FOLDER = 'uploads'
-RECORD_FOLDER = 'records'
-os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-os.makedirs(RECORD_FOLDER, exist_ok=True)
+        <!-- Tabs for Operations -->
+        <ul class="nav nav-tabs" id="operation-tabs" role="tablist">
+            <li class="nav-item" role="presentation">
+                <button class="nav-link active" id="record-tab" data-bs-toggle="tab" data-bs-target="#record" type="button" role="tab" aria-controls="record" aria-selected="true">
+                    <i class="bi bi-mic"></i> Record Signal
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="transmit-tab" data-bs-toggle="tab" data-bs-target="#transmit" type="button" role="tab" aria-controls="transmit" aria-selected="false">
+                    <i class="bi bi-broadcast-pin"></i> Transmit Signal
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="files-tab" data-bs-toggle="tab" data-bs-target="#files" type="button" role="tab" aria-controls="files" aria-selected="false">
+                    <i class="bi bi-files"></i> File Management
+                </button>
+            </li>
+        </ul>
 
-# C程序路径（新增）
-RX_C_PROGRAM = "/usr/lib/uhd/examples/rx_samples_to_file"
-TX_C_PROGRAM = "/usr/lib/uhd/examples/tx_samples_from_file"
+        <div class="tab-content" id="operation-tabs-content">
+            <!-- Recording Tab -->
+            <div class="tab-pane fade show active" id="record" role="tabpanel" aria-labelledby="record-tab">
+                <div class="card mt-3">
+                    <div class="card-header bg-success text-white">
+                        <h2 class="h5 mb-0">Recording Configuration</h2>
+                    </div>
+                    <div class="card-body">
+                        <form id="record-form">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="param-group">
+                                        <label for="record-filename" class="form-label">File Name</label>
+                                        <input type="text" class="form-control" id="record-filename" placeholder="recording_1" required>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="record-frequency" class="form-label">Frequency (Hz)</label>
+                                        <input type="number" class="form-control" id="record-frequency" value="634000000" min="0" step="1000000" required>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="record-duration" class="form-label">Duration (seconds)</label>
+                                        <input type="number" class="form-control" id="record-duration" value="5" min="1" step="1" required>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="param-group">
+                                        <label for="record-samplerate" class="form-label">Sample Rate (samples/sec)</label>
+                                        <input type="number" class="form-control" id="record-samplerate" value="7680000" min="100000" step="100000" required>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="record-gain" class="form-label">Gain (dB)</label>
+                                        <input type="number" class="form-control" id="record-gain" value="50" min="0" max="70" step="10" required>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="record-channel" class="form-label">Channel</label>
+                                        <input type="number" class="form-control" id="record-channel" value="0" min="0" max="1" step="1" required>
+                                    </div>
+                                </div>
+                            </div>                            
+                            <div id="storage-warning" class="alert alert-danger mt-3" style="display: none;">
+                                <strong>存储空间不足！</strong>
+                                <span id="storage-warning-message"></span>
+                            </div>
+                            
+                            <div id="storage-status" class="alert alert-info mt-3" style="display: none;">
+                                <strong>存储状态：</strong>
+                                <span id="storage-status-message"></span>
+                            </div>
+                            <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+                                <button type="button" id="start-record" class="btn btn-success">
+                                    <i class="bi bi-play"></i> Start Recording
+                                </button>
+                                <button type="button" id="stop-record" class="btn btn-danger" disabled>
+                                    <i class="bi bi-stop"></i> Stop Recording
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
 
-# 默认参数设置
-DEFAULT_FREQUENCY = 634000000  # 634 MHz
-DEFAULT_SAMPLE_RATE = 7000000  # 7 MHz
-DEFAULT_GAIN = 30.0
-DEFAULT_CHANNEL = 0
+            <!-- Transmission Tab -->
+            <div class="tab-pane fade" id="transmit" role="tabpanel" aria-labelledby="transmit-tab">
+                <div class="card mt-3">
+                    <div class="card-header bg-warning text-dark">
+                        <h2 class="h5 mb-0">Transmission Configuration</h2>
+                    </div>
+                    <div class="card-body">
+                        <form id="transmit-form">
+                            <div class="row">
+                                <div class="col-md-6">
+                                    <div class="param-group">
+                                        <label for="transmit-filename" class="form-label">File to Transmit</label>
+                                        <select class="form-select" id="transmit-filename" required>
+                                            <option value="">Select a file...</option>
+                                        </select>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="transmit-frequency" class="form-label">Frequency (Hz)</label>
+                                        <input type="number" class="form-control" id="transmit-frequency" value="634000000" min="0" step="1000000" required>
+                                    </div>
+                                </div>
+                                <div class="col-md-6">
+                                    <div class="param-group">
+                                        <label for="transmit-samplerate" class="form-label">Sample Rate (samples/sec)</label>
+                                        <input type="number" class="form-control" id="transmit-samplerate" value="7680000" min="100000" step="100000" required>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="transmit-gain" class="form-label">Gain (dB)</label>
+                                        <input type="number" class="form-control" id="transmit-gain" value="70" min="0" max="70" step="10" required>
+                                    </div>
+                                    <div class="param-group">
+                                        <label for="transmit-channel" class="form-label">Channel</label>
+                                        <input type="number" class="form-control" id="transmit-channel" value="0" min="0" max="1" step="1" required>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+                                <button type="button" id="start-transmit" class="btn btn-warning text-dark">
+                                    <i class="bi bi-play"></i> Start Transmission
+                                </button>
+                                <button type="button" id="stop-transmit" class="btn btn-danger" disabled>
+                                    <i class="bi bi-stop"></i> Stop Transmission
+                                </button>
+                            </div>
+                        </form>
+                    </div>
+                </div>
+            </div>
 
-# 发送配置 - 参考UHD官方示例
-MAX_SAMPLES_PER_PACKET = 32768  # 每包最大样本数
-NUM_BUFFERS = 16  # 缓冲区数量
-PACKET_SIZE = MAX_SAMPLES_PER_PACKET * 4  # 每包字节数
-FILE_READ_CHUNK = NUM_BUFFERS * PACKET_SIZE  # 一次读取的文件块大小
-STREAM_TIMEOUT = 0.1  # 100ms 流超时
-PROGRESS_LOG_INTERVAL = 10  # 每10%进度记录一次日志
+            <!-- File Management Tab -->
+            <div class="tab-pane fade" id="files" role="tabpanel" aria-labelledby="files-tab">
+                <div class="card mt-3">
+                    <div class="card-header bg-info text-white">
+                        <h2 class="h5 mb-0">File Management</h2>
+                    </div>
+                    <div class="card-body">
+                        <!-- File Upload -->
+                        <div class="mb-5">
+                            <h3 class="h6 section-title">Upload IQ File</h3>
+                            <div class="input-group">
+                                <input type="file" class="form-control" id="file-upload" accept=".iq,.bin,.dat">
+                                <button class="btn btn-primary" type="button" id="upload-button">Upload</button>
+                            </div>
+                            <div id="upload-status" class="mt-2 text-muted"></div>
+                        </div>
 
-# 全局状态
-app_state = {
-    'recording': False,
-    'transmitting': False,
-    'selected_device': None,
-    'record_thread': None,
-    'transmit_thread': None,
-    'stop_event': threading.Event(),
-    'transmission_progress': 0,
-    'record_process': None,  # 新增：记录C程序进程
-    'transmit_process': None  # 新增：发送C程序进程
-}
+                        <!-- Uploaded Files -->
+                        <div class="mb-5">
+                            <h3 class="h6 section-title">Uploaded Files</h3>
+                            <div id="uploaded-files-list">
+                                <div class="text-muted">No uploaded files</div>
+                            </div>
+                        </div>
 
-# 设备地址模式
-common_addresses = [
-    "",  # 默认地址
-]
+                        <!-- Recorded Files -->
+                        <div>
+                            <h3 class="h6 section-title">Recorded Files</h3>
+                            <div id="recorded-files-list">
+                                <div class="text-muted">No recorded files</div>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
 
-# 设备发现（保持不变）
-def discover_devices():
-    devices = []
-    tested_addrs = set()
-    
-    for addr_str in common_addresses:
-        if addr_str in tested_addrs:
-            continue
-        tested_addrs.add(addr_str)
-        
-        try:
-            usrp_device = usrp.MultiUSRP(addr_str)
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // 全局状态
+        let appState = {
+            recording: false,
+            transmitting: false,
+            selectedDevice: null,
+            storage: {
+                enough: true,
+                available_mb: 0,
+                required_mb: 0
+            }
+        };
+
+        // 页面加载完成后初始化
+        document.addEventListener('DOMContentLoaded', function() {
+            // 初始化设备列表
+            refreshDevices();
             
-            dev_type = "USRP Device"
-            dev_identifier = addr_str if addr_str else "default"
+            // 初始化文件列表
+            refreshFileLists();
             
-            if addr_str.startswith("type="):
-                dev_type = addr_str.split("=")[1].upper()
-            elif addr_str.startswith("ip="):
-                dev_type = f"USRP at {addr_str.split('=')[1]}"
-                
-            # 获取设备的详细信息
-            pp_string = usrp_device.get_pp_string()
+            // 定期检查状态
+            setInterval(checkStatus, 1000);
             
-            # 提取主板型号
-            model = "Unknown"
-            for line in pp_string.split('\n'):
-                if "Mboard 0:" in line:
-                    model = line.split(":")[1].strip()
-                    break
+            document.getElementById('record-filename').value = generateTimestampFilename();
             
-            device = {
-                "id": dev_identifier,
-                "type": dev_type,
-                "serial": model,
-                "ip": addr_str.split("=")[1] if addr_str.startswith("ip=") else "unknown"
+            // 设备刷新按钮
+            document.getElementById('refresh-devices').addEventListener('click', refreshDevices);
+            
+            // 录制控制
+            document.getElementById('start-record').addEventListener('click', startRecording);
+            document.getElementById('stop-record').addEventListener('click', stopRecording);
+            
+            // 发送控制
+            document.getElementById('start-transmit').addEventListener('click', startTransmission);
+            document.getElementById('stop-transmit').addEventListener('click', stopTransmission);
+            
+            // 文件上传
+            document.getElementById('upload-button').addEventListener('click', uploadFile);
+            
+            // 检查存储状态
+            checkStorageStatus();
+            // 每30秒检查一次存储状态
+            setInterval(checkStorageStatus, 30000);            
+            
+        });
+
+        // 刷新设备列表
+        function refreshDevices() {
+            fetch('/api/devices')
+                .then(response => response.json())
+                .then(data => {
+                    const deviceList = document.getElementById('device-list');
+                    deviceList.innerHTML = '';
+                    
+                    if (data.devices.length === 0) {
+                        deviceList.innerHTML = '<div class="text-muted">No USRP devices found</div>';
+                        return;
+                    }
+                    
+                    data.devices.forEach(device => {
+                        const item = document.createElement('div');
+                        item.className = `list-group-item d-flex justify-content-between align-items-center ${device.id === data.selected ? 'list-group-item-primary' : ''}`;
+                        
+                        const deviceInfo = `
+                            <div>
+                                <strong>${device.type}</strong> (${device.id})
+                                <div class="text-muted small device-info">
+                                    Serial: ${device.serial}
+                                    ${device.ip !== 'unknown' ? `<br>IP: ${device.ip}` : ''}
+                                </div>
+                            </div>
+                            <div class="d-flex align-items-center">
+                                <span class="status-indicator status-connected me-2"></span>
+                                <button class="btn btn-sm btn-outline-primary select-device" data-id="${device.id}">
+                                    ${device.id === data.selected ? 'Selected' : 'Select'}
+                                </button>
+                            </div>
+                        `;
+                        
+                        item.innerHTML = deviceInfo;
+                        deviceList.appendChild(item);
+                    });
+                    
+                    // 添加设备选择事件
+                    document.querySelectorAll('.select-device').forEach(button => {
+                        button.addEventListener('click', function() {
+                            const deviceId = this.getAttribute('data-id');
+                            selectDevice(deviceId);
+                        });
+                    });
+                    
+                    appState.selectedDevice = data.selected;
+                })
+                .catch(error => {
+                    console.error('Error fetching devices:', error);
+                    const deviceList = document.getElementById('device-list');
+                    deviceList.innerHTML = '<div class="text-danger">Error discovering devices. Check UHD installation.</div>';
+                });
+        }
+
+        // 选择设备
+        function selectDevice(deviceId) {
+            fetch('/api/select-device', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({ device_id: deviceId })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    appState.selectedDevice = data.selected;
+                    refreshDevices();
+                } else {
+                    alert('Failed to select device: ' + (data.message || 'Unknown error'));
+                }
+            })
+            .catch(error => console.error('Error selecting device:', error));
+        }
+
+        // 检查系统状态
+        function checkStatus() {
+            fetch('/api/status')
+                .then(response => response.json())
+                .then(data => {
+                    // 保存之前的录制状态用于判断状态变化
+                    const wasRecording = appState.recording;
+                    
+                    appState.recording = data.recording;
+                    appState.transmitting = data.transmitting;
+                    appState.selectedDevice = data.selected_device;
+                    
+                    // 更新状态显示
+                    const statusText = document.getElementById('status-text');
+                    const activityIndicator = document.getElementById('activity-indicator');
+                    const systemStatus = document.getElementById('system-status');
+                    
+                    if (appState.recording) {
+                        statusText.textContent = 'Recording in progress...';
+                        systemStatus.className = 'alert alert-danger mt-3';
+                        activityIndicator.style.display = 'inline-block';
+                    } else if (appState.transmitting) {
+                        statusText.textContent = 'Transmitting in progress...';
+                        systemStatus.className = 'alert alert-warning mt-3';
+                        activityIndicator.style.display = 'inline-block';
+                    } else {
+                        statusText.textContent = 'Ready';
+                        systemStatus.className = 'alert alert-info mt-3';
+                        activityIndicator.style.display = 'none';
+                    }
+                    
+                    // 更新按钮状态
+                    document.getElementById('start-record').disabled = appState.recording || appState.transmitting || !appState.selectedDevice;
+                    document.getElementById('stop-record').disabled = !appState.recording;
+                    
+                    document.getElementById('start-transmit').disabled = appState.transmitting || appState.recording || !appState.selectedDevice;
+                    document.getElementById('stop-transmit').disabled = !appState.transmitting;
+                    
+                    // 关键逻辑：当录制状态从true变为false时（录制完成），刷新文件名
+                    if (wasRecording && !appState.recording) {
+                        document.getElementById('record-filename').value = generateTimestampFilename();
+                        showNotification('录制已完成', 'success');
+                    }                    
+                    
+                    // 如果状态变化，刷新文件列表
+                    if (!appState.recording && !appState.transmitting) {
+                        refreshFileLists();
+                    }
+                })
+                .catch(error => console.error('Error checking status:', error));
+        }
+
+        // 开始录制
+        function startRecording() {
+            if (!appState.selectedDevice) {
+                alert('Please select a device first');
+                return;
             }
             
-            devices.append(device)
-            app.logger.info(f"Found USRP device: {device['type']}")
+            const recordData = {
+                filename: document.getElementById('record-filename').value,
+                frequency: parseFloat(document.getElementById('record-frequency').value),
+                duration: parseFloat(document.getElementById('record-duration').value),
+                sample_rate: parseInt(document.getElementById('record-samplerate').value),
+                gain: parseFloat(document.getElementById('record-gain').value),
+                channel: parseInt(document.getElementById('record-channel').value)
+            };
             
-            del usrp_device
-            
-        except Exception as e:
-            app.logger.debug(f"Device not found at {addr_str}: {str(e)}")
-            continue
-    
-    return devices
-
-# 保存IQ数据（保持不变，不被调用）
-def save_iq_data(samples, filename, chunk_size=1048576):
-    if not filename.endswith(('.iq', '.bin', '.dat')):
-        filename += '.iq'
-    
-    full_path = os.path.join(RECORD_FOLDER, filename)
-    
-    total_samples = len(samples)
-    samples_per_chunk = chunk_size // 4
-    
-    with open(full_path, 'wb', buffering=8*1024*1024) as f:
-        app.logger.info(f"开始分块保存数据，总样本数: {total_samples}, 分块大小: {samples_per_chunk}")
-        
-        for i in range(0, total_samples, samples_per_chunk):
-            end_idx = min(i + samples_per_chunk, total_samples)
-            chunk = samples[i:end_idx]
-            
-            iq_data = np.empty(2 * len(chunk), dtype=np.int16)
-            iq_data[0::2] = (chunk.real * 32767).astype(np.int16)
-            iq_data[1::2] = (chunk.imag * 32767).astype(np.int16)
-            
-            f.write(iq_data.tobytes())
-            
-            progress = int((end_idx / total_samples) * 100)
-            if progress % 10 == 0 and progress > (int((i / total_samples) * 100) // 10) * 10:
-                app.logger.info(f"保存进度: {progress}%")
-    
-    app.logger.info(f"已将 {total_samples} 个样本保存为INT16格式IQ数据，文件大小: {os.path.getsize(full_path)} 字节")
-    return full_path
-
-# 原有录制线程函数（保留，不被调用）
-def record_thread_func(params):
-    try:
-        usrp_args = params['device_id'] if params['device_id'] else ""
-        usrp_device = usrp.MultiUSRP(usrp_args)
-        
-        channel = params.get('channel', DEFAULT_CHANNEL)
-        sample_rate = params.get('sample_rate', DEFAULT_SAMPLE_RATE)
-        frequency = params.get('frequency', DEFAULT_FREQUENCY)
-        gain = params.get('gain', DEFAULT_GAIN)
-        
-        usrp_device.set_rx_rate(sample_rate, channel)
-        usrp_device.set_rx_freq(uhd.types.TuneRequest(frequency), channel)
-        usrp_device.set_rx_gain(gain, channel)
-        
-        actual_rate = usrp_device.get_rx_rate(channel)
-        actual_freq = usrp_device.get_rx_freq(channel)
-        app.logger.info(f"实际采样率: {actual_rate}, 实际频率: {actual_freq}")
-        
-        num_samples = int(sample_rate * params['duration'])
-        app.logger.info(f"开始录制, 样本数: {num_samples}, 频率: {frequency}Hz, 采样率: {sample_rate}Hz")
-        
-        st_args = usrp.StreamArgs("fc32", "sc16")
-        st_args.channels = [channel]
-        rx_streamer = usrp_device.get_rx_stream(st_args)
-        
-        metadata = uhd.types.RXMetadata()
-        buffer = np.zeros((1, num_samples), dtype=np.complex64)
-        recv_offset = 0
-        total_recv = 0
-        
-        time.sleep(0.5)
-        
-        stream_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.start_cont)
-        stream_cmd.stream_now = True
-        rx_streamer.issue_stream_cmd(stream_cmd)
-        
-        last_logged_progress = -1
-        while total_recv < num_samples and not app_state['stop_event'].is_set():
-            recv_samps = rx_streamer.recv(
-                buffer[:, recv_offset:],
-                metadata
-            )
-            
-            if metadata.error_code != uhd.types.RXMetadataErrorCode.none:
-                app.logger.warning(f"接收错误: {metadata.strerror()}")
-                if metadata.error_code == uhd.types.RXMetadataErrorCode.fatal:
-                    break
-                continue
-                
-            total_recv += recv_samps
-            recv_offset += recv_samps
-            
-            progress = min(100, int((total_recv / num_samples) * 100))
-            if progress % PROGRESS_LOG_INTERVAL == 0 and progress != last_logged_progress:
-                app.logger.info(f"录制进度: {progress}%")
-                last_logged_progress = progress
-        
-        stream_cmd = uhd.types.StreamCMD(uhd.types.StreamMode.stop_cont)
-        rx_streamer.issue_stream_cmd(stream_cmd)
-        
-        if total_recv > 0:
-            try:
-                file_path = save_iq_data(buffer[0, :total_recv], params['filename'], chunk_size=524288)
-                app.logger.info(f"录制完成. 保存至 {file_path}, 实际接收样本: {total_recv}")
-            except IOError as e:
-                if "No space left on device" in str(e):
-                    app.logger.error(f"保存文件失败：存储空间不足")
-                else:
-                    app.logger.error(f"保存文件失败: {str(e)}")
-        else:
-            app.logger.warning("未接收到任何样本数据")
-        
-    except Exception as e:
-        app.logger.error(f"录制错误: {str(e)}")
-    finally:
-        app_state['recording'] = False
-        app_state['stop_event'].clear()
-        app_state['record_thread'] = None
-
-# 新增：调用C程序的录制线程函数
-def c_record_thread_func(params):
-    try:
-        # 构建输出文件路径
-        filename = params['filename']
-        if not filename.endswith(('.iq', '.bin', '.dat')):
-            filename += '.iq'
-        full_path = os.path.join(RECORD_FOLDER, filename)
-        
-        # 构建C程序命令参数
-        args = [
-            RX_C_PROGRAM,
-            f"--args={params['device_id'] or ''}",
-            f"--freq={params['frequency']}",
-            f"--rate={params['sample_rate']}",
-            f"--gain={params['gain']}",
-            f"--duration={params['duration']}",
-            f"--channel={params.get('channel', DEFAULT_CHANNEL)}",
-            f"--file={full_path}"
-        ]
-        
-        app.logger.info(f"启动C录制程序: {' '.join(args)}")
-        
-        # 启动C程序进程
-        app_state['record_process'] = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        
-        # 实时读取输出日志
-        for line in app_state['record_process'].stdout:
-            app.logger.info(f"RX_C: {line.strip()}")
-            if app_state['stop_event'].is_set():
-                break
-        
-        # 等待进程结束
-        app_state['record_process'].wait()
-        
-        if app_state['record_process'].returncode == 0:
-            app.logger.info(f"C程序录制完成，文件保存至: {full_path}")
-        else:
-            app.logger.error(f"C程序录制失败，返回码: {app_state['record_process'].returncode}")
-            if os.path.exists(full_path):
-                os.remove(full_path)  # 删除不完整文件
-                
-    except Exception as e:
-        app.logger.error(f"C程序录制错误: {str(e)}")
-    finally:
-        app_state['recording'] = False
-        app_state['stop_event'].clear()
-        app_state['record_thread'] = None
-        app_state['record_process'] = None
-
-# 原有发送线程函数（保留，不被调用）
-def transmit_thread_func(params):
-    app_state['transmission_progress'] = 0
-    
-    try:
-        filename = params['filename']
-        full_path = None
-        
-        possible_paths = [
-            os.path.join(RECORD_FOLDER, filename),
-            os.path.join(UPLOAD_FOLDER, filename)
-        ]
-        
-        if not any(filename.endswith(ext) for ext in ('.iq', '.bin', '.dat')):
-            for ext in ('.iq', '.bin', '.dat'):
-                possible_paths.insert(0, os.path.join(RECORD_FOLDER, filename + ext))
-                possible_paths.append(os.path.join(UPLOAD_FOLDER, filename + ext))
-        
-        app.logger.debug(f"查找文件 {filename}，检查路径: {possible_paths}")
-        
-        for path in possible_paths:
-            if os.path.exists(path) and os.path.isfile(path):
-                full_path = path
-                app.logger.debug(f"找到文件: {full_path}")
-                break
-        
-        if not full_path or not os.path.exists(full_path):
-            app.logger.error(f"文件未找到: {filename}")
-            return
-        
-        file_size = os.path.getsize(full_path)
-        if file_size % 4 != 0:
-            app.logger.error(f"文件大小无效，不是INT16 IQ数据格式 (大小: {file_size} 字节，应为4的倍数)")
-            return
-            
-        if file_size == 0:
-            app.logger.error(f"文件为空: {full_path}")
-            return
-        
-        num_samples = file_size // 4
-        app.logger.info(f"文件大小: {file_size} 字节，包含 {num_samples} 个INT16格式IQ样本，准备发送...")
-        
-        usrp_args = params['device_id'] if params['device_id'] else ""
-        app.logger.info(f"使用设备: {usrp_args}")
-        
-        try:
-            usrp_device = usrp.MultiUSRP(usrp_args)
-            app.logger.info("USRP设备初始化成功")
-        except Exception as e:
-            app.logger.error(f"USRP设备初始化失败: {str(e)}")
-            return
-        
-        channel = params.get('channel', DEFAULT_CHANNEL)
-        sample_rate = params.get('sample_rate', DEFAULT_SAMPLE_RATE)
-        frequency = params.get('frequency', DEFAULT_FREQUENCY)
-        gain = params.get('gain', DEFAULT_GAIN)
-        
-        try:
-            usrp_device.set_clock_source("internal")
-            app.logger.info("设置时钟源为内部时钟")
-        except Exception as e:
-            app.logger.warning(f"无法设置时钟源: {str(e)}")
-        
-        try:
-            usrp_device.set_tx_rate(sample_rate, channel)
-            actual_rate = usrp_device.get_tx_rate(channel)
-            app.logger.info(f"设置发送采样率: {sample_rate}, 实际: {actual_rate}")
-            
-            tune_request = uhd.types.TuneRequest(frequency)
-            usrp_device.set_tx_freq(tune_request, channel)
-            actual_freq = usrp_device.get_tx_freq(channel)
-            app.logger.info(f"设置发送频率: {frequency}, 实际: {actual_freq}")
-            
-            usrp_device.set_tx_gain(gain, channel)
-            actual_gain = usrp_device.get_tx_gain(channel)
-            app.logger.info(f"设置发送增益: {gain}, 实际: {actual_gain}")
-            
-            try:
-                usrp_device.set_tx_antenna("TX/RX", channel)
-                app.logger.info("设置发送天线为TX/RX")
-            except Exception as e:
-                app.logger.warning(f"无法设置发送天线: {str(e)}")
-                
-        except Exception as e:
-            app.logger.error(f"设置USRP参数失败: {str(e)}")
-            return
-        
-        try:
-            st_args = usrp.StreamArgs("fc32", "sc16")
-            st_args.channels = [channel]
-            tx_streamer = usrp_device.get_tx_stream(st_args)
-            
-            max_num_samps = 32768
-            app.logger.info(f"使用固定最大发送样本数: {max_num_samps}")
-            
-            global MAX_SAMPLES_PER_PACKET
-            MAX_SAMPLES_PER_PACKET = max_num_samps
-                
-        except Exception as e:
-            app.logger.error(f"创建发送流失败: {str(e)}")
-            return
-        
-        send_time = usrp_device.get_time_now() + uhd.types.TimeSpec(0.1)
-        
-        metadata = uhd.types.TXMetadata()
-        metadata.start_of_burst = True
-        metadata.end_of_burst = False
-        metadata.time_spec = send_time
-        
-        app.logger.info("等待设备就绪...")
-        time.sleep(0.5)
-        
-        total_num_samps = num_samples
-        samples_sent = 0
-        last_logged_progress = -1
-        
-        with open(full_path, 'rb') as f:
-            app.logger.info("开始发送数据...")
-            
-            buffer = np.zeros(MAX_SAMPLES_PER_PACKET, dtype=np.complex64)
-            
-            while samples_sent < total_num_samps and not app_state['stop_event'].is_set():
-                remaining = total_num_samps - samples_sent
-                samps_to_send = min(remaining, MAX_SAMPLES_PER_PACKET)
-                
-                data = f.read(samps_to_send * 4)
-                if not data:
-                    break
-                    
-                iq_int16 = np.frombuffer(data, dtype=np.int16)
-                i_components = iq_int16[0::2].astype(np.float32)
-                q_components = iq_int16[1::2].astype(np.float32)
-                
-                max_val = 32768
-                buffer[:samps_to_send] = (i_components / max_val) + 1j * (q_components / max_val)
-                
-                offset = 0
-                while offset < samps_to_send:
-                    remaining_in_buffer = samps_to_send - offset
-                    
-                    try:
-                        sent = tx_streamer.send(
-                            buffer[offset:offset+remaining_in_buffer],
-                            metadata,
-                            STREAM_TIMEOUT
-                        )
-                        
-                        if sent == 0:
-                            app.logger.warning("发送超时，没有样本被发送")
-                            time.sleep(0.001)
-                            continue
-                            
-                        offset += sent
-                        samples_sent += sent
-                        
-                        metadata.start_of_burst = False
-                        metadata.time_spec = uhd.types.TimeSpec(0.0)
-                        
-                    except Exception as e:
-                        app.logger.error(f"发送错误: {str(e)}")
-                        time.sleep(0.1)
-                        continue
-                
-                progress = min(100, int((samples_sent / total_num_samps) * 100))
-                app_state['transmission_progress'] = progress
-                
-                if progress % PROGRESS_LOG_INTERVAL == 0 and progress != last_logged_progress:
-                    app.logger.info(f"发送进度: {progress}%")
-                    last_logged_progress = progress
-        
-        metadata.end_of_burst = True
-        tx_streamer.send(np.array([], dtype=np.complex64), metadata)
-        
-        app.logger.info(f"发送完成，总发送样本: {samples_sent}/{total_num_samps} ({samples_sent/total_num_samps*100:.1f}%)")
-        
-        if samples_sent < total_num_samps:
-            app.logger.warning(f"发送不完整，缺少 {total_num_samps - samples_sent} 个样本")
-        
-    except Exception as e:
-        app.logger.error(f"发送错误: {str(e)}")
-    finally:
-        app_state['transmitting'] = False
-        app_state['stop_event'].clear()
-        app_state['transmit_thread'] = None
-        app_state['transmission_progress'] = 0
-
-# 新增：调用C程序的发送线程函数
-def c_transmit_thread_func(params):
-    app_state['transmission_progress'] = 0
-    
-    try:
-        filename = params['filename']
-        full_path = None
-        
-        # 查找文件（与原有逻辑一致）
-        possible_paths = [
-            os.path.join(RECORD_FOLDER, filename),
-            os.path.join(UPLOAD_FOLDER, filename)
-        ]
-        
-        if not any(filename.endswith(ext) for ext in ('.iq', '.bin', '.dat')):
-            for ext in ('.iq', '.bin', '.dat'):
-                possible_paths.insert(0, os.path.join(RECORD_FOLDER, filename + ext))
-                possible_paths.append(os.path.join(UPLOAD_FOLDER, filename + ext))
-        
-        app.logger.debug(f"查找文件 {filename}，检查路径: {possible_paths}")
-        
-        for path in possible_paths:
-            if os.path.exists(path) and os.path.isfile(path):
-                full_path = path
-                app.logger.debug(f"找到文件: {full_path}")
-                break
-        
-        if not full_path or not os.path.exists(full_path):
-            app.logger.error(f"文件未找到: {filename}")
-            return
-        
-        # 构建C程序命令参数
-        args = [
-            TX_C_PROGRAM,
-            f"--args={params['device_id'] or ''}",
-            f"--freq={params['frequency']}",
-            f"--rate={params['sample_rate']}",
-            f"--gain={params['gain']}",
-            f"--channel={params.get('channel', DEFAULT_CHANNEL)}",
-            f"--file={full_path}"
-        ]
-        
-        app.logger.info(f"启动C发送程序: {' '.join(args)}")
-        
-        # 启动C程序进程
-        app_state['transmit_process'] = subprocess.Popen(
-            args,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            text=True
-        )
-        
-        # 获取文件总大小用于计算进度
-        file_size = os.path.getsize(full_path)
-        total_samples = file_size // 4
-        last_progress = 0
-        
-        # 实时读取输出并估算进度
-        for line in app_state['transmit_process'].stdout:
-            app.logger.info(f"TX_C: {line.strip()}")
-            
-            # 尝试从输出中提取已发送样本数（假设C程序会输出类似"Sent X samples"的日志）
-            if "Sent" in line and "samples" in line:
-                try:
-                    sent_samples = int(line.split()[1])
-                    progress = min(100, int((sent_samples / total_samples) * 100))
-                    if progress != last_progress:
-                        app_state['transmission_progress'] = progress
-                        last_progress = progress
-                except (IndexError, ValueError):
-                    pass
-                    
-            if app_state['stop_event'].is_set():
-                break
-        
-        # 等待进程结束
-        app_state['transmit_process'].wait()
-        
-        if app_state['transmit_process'].returncode == 0:
-            app.logger.info(f"C程序发送完成，文件: {full_path}")
-            app_state['transmission_progress'] = 100
-        else:
-            app.logger.error(f"C程序发送失败，返回码: {app_state['transmit_process'].returncode}")
-                
-    except Exception as e:
-        app.logger.error(f"C程序发送错误: {str(e)}")
-    finally:
-        app_state['transmitting'] = False
-        app_state['stop_event'].clear()
-        app_state['transmit_thread'] = None
-        app_state['transmit_process'] = None
-        app_state['transmission_progress'] = 0
-
-# 获取发送进度（保持不变）
-@app.route('/api/transmission-progress')
-def get_transmission_progress():
-    return jsonify({
-        'progress': app_state['transmission_progress']
-    })
-
-# 路由定义（仅修改启动录制/发送的路由）
-@app.route('/')
-def index():
-    return render_template('index.html')
-
-@app.route('/api/default-params')
-def get_default_params():
-    return jsonify({
-        'frequency': DEFAULT_FREQUENCY,
-        'sample_rate': DEFAULT_SAMPLE_RATE,
-        'gain': DEFAULT_GAIN,
-        'channel': DEFAULT_CHANNEL
-    })
-
-@app.route('/api/devices')
-def get_devices():
-    devices = discover_devices()
-    return jsonify({
-        'devices': devices,
-        'selected': app_state['selected_device']
-    })
-
-@app.route('/api/select-device', methods=['POST'])
-def select_device():
-    data = request.json
-    device_id = data.get('device_id')
-    
-    devices = discover_devices()
-    device_ids = [d['id'] for d in devices]
-    
-    if device_id in device_ids:
-        app_state['selected_device'] = device_id
-        return jsonify({
-            'status': 'success',
-            'selected': device_id
-        })
-    else:
-        return jsonify({
-            'status': 'error',
-            'message': '设备未找到'
-        }), 404
-
-@app.route('/api/status')
-def get_status():
-    return jsonify({
-        'recording': app_state['recording'],
-        'transmitting': app_state['transmitting'],
-        'selected_device': app_state['selected_device']
-    })
-
-@app.route('/api/start-recording', methods=['POST'])
-def start_recording():
-    if app_state['recording'] or app_state['transmitting']:
-        return jsonify({
-            'status': 'error',
-            'message': '有其他操作正在进行'
-        })
-    
-    if not app_state['selected_device']:
-        return jsonify({
-            'status': 'error',
-            'message': '未选择设备'
-        })
-    
-    data = request.json
-    
-    try:
-        params = {
-            'filename': data['filename'],
-            'frequency': float(data.get('frequency', DEFAULT_FREQUENCY)),
-            'duration': float(data['duration']),
-            'sample_rate': int(data.get('sample_rate', DEFAULT_SAMPLE_RATE)),
-            'gain': float(data.get('gain', DEFAULT_GAIN)),
-            'channel': int(data.get('channel', DEFAULT_CHANNEL)),
-            'device_id': app_state['selected_device']
-        }
-        
-        # 重置停止事件
-        app_state['stop_event'].clear()
-        # 使用C程序线程（替换原有Python线程）
-        app_state['record_thread'] = threading.Thread(
-            target=c_record_thread_func,
-            args=(params,)
-        )
-        app_state['recording'] = True
-        app_state['record_thread'].start()
-        
-        return jsonify({
-            'status': 'success',
-            'message': '开始录制'
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-@app.route('/api/stop-recording', methods=['POST'])
-def stop_recording():
-    if not app_state['recording']:
-        return jsonify({
-            'status': 'error',
-            'message': '未在录制'
-        })
-    
-    # 停止C程序进程（新增）
-    if app_state['record_process']:
-        try:
-            app_state['record_process'].terminate()
-            app_state['record_process'].wait(timeout=5)
-            app.logger.info("C录制程序已终止")
-        except subprocess.TimeoutExpired:
-            app_state['record_process'].kill()
-            app.logger.warning("强制终止C录制程序")
-    
-    app_state['stop_event'].set()
-    return jsonify({
-        'status': 'success',
-        'message': '停止录制'
-    })
-
-@app.route('/api/start-transmission', methods=['POST'])
-def start_transmission():
-    if app_state['transmitting'] or app_state['recording']:
-        return jsonify({
-            'status': 'error',
-            'message': '有其他操作正在进行'
-        })
-    
-    if not app_state['selected_device']:
-        return jsonify({
-            'status': 'error',
-            'message': '未选择设备'
-        })
-    
-    data = request.json
-    filename = data.get('filename')
-    
-    if not filename:
-        return jsonify({
-            'status': 'error',
-            'message': '未指定文件名'
-        })
-    
-    try:
-        params = {
-            'filename': filename,
-            'frequency': float(data.get('frequency', DEFAULT_FREQUENCY)),
-            'sample_rate': int(data.get('sample_rate', DEFAULT_SAMPLE_RATE)),
-            'gain': float(data.get('gain', DEFAULT_GAIN)),
-            'channel': int(data.get('channel', DEFAULT_CHANNEL)),
-            'device_id': app_state['selected_device']
-        }
-        
-        app_state['stop_event'].clear()
-        # 使用C程序线程（替换原有Python线程）
-        app_state['transmit_thread'] = threading.Thread(
-            target=c_transmit_thread_func,
-            args=(params,)
-        )
-        app_state['transmitting'] = True
-        app_state['transmit_thread'].start()
-        
-        return jsonify({
-            'status': 'success',
-            'message': '开始发送'
-        })
-    except Exception as e:
-        return jsonify({
-            'status': 'error',
-            'message': str(e)
-        }), 500
-
-@app.route('/api/stop-transmission', methods=['POST'])
-def stop_transmission():
-    if not app_state['transmitting']:
-        return jsonify({
-            'status': 'error',
-            'message': '未在发送'
-        })
-    
-    # 停止C程序进程（新增）
-    if app_state['transmit_process']:
-        try:
-            app_state['transmit_process'].terminate()
-            app_state['transmit_process'].wait(timeout=5)
-            app.logger.info("C发送程序已终止")
-        except subprocess.TimeoutExpired:
-            app_state['transmit_process'].kill()
-            app.logger.warning("强制终止C发送程序")
-    
-    app_state['stop_event'].set()
-    return jsonify({
-        'status': 'success',
-        'message': '停止发送'
-    })
-
-# 其他路由保持不变（省略，与原代码一致）
-
-@app.route('/api/files')
-def get_files():
-    uploads = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
-    records = [f for f in os.listdir(RECORD_FOLDER) if os.path.isfile(os.path.join(RECORD_FOLDER, f))]
-    
-    return jsonify({
-        'uploads': uploads,
-        'records': records
-    })
-
-@app.route('/api/upload', methods=['POST'])
-def upload_file():
-    if 'file' not in request.files:
-        return jsonify({'status': 'error', 'message': '没有文件部分'})
-    
-    file = request.files['file']
-    if file.filename == '':
-        return jsonify({'status': 'error', 'message': '未选择文件'})
-    
-    if file:
-        filename = file.filename
-        filename = os.path.basename(filename)
-        if not any(filename.endswith(ext) for ext in ('.iq', '.bin', '.dat')):
-            filename += '.iq'
-        
-        filepath = os.path.join(UPLOAD_FOLDER, filename)
-        file.save(filepath)
-        
-        # 验证上传文件是否为INT16格式
-        file_size = os.path.getsize(filepath)
-        if file_size % 4 != 0:
-            app.logger.warning(f"上传的文件可能不是INT16 IQ格式 (大小: {file_size} 字节，不是4的倍数)")
-        
-        return jsonify({'status': 'success', 'filename': filename})
-    
-    return jsonify({'status': 'error', 'message': '文件上传失败'})
-
-@app.route('/api/delete-file/<folder>/<filename>', methods=['DELETE'])
-def delete_file(folder, filename):
-    if folder not in ['uploads', 'records']:
-        return jsonify({'status': 'error', 'message': '无效的文件夹'})
-    
-    folder_path = UPLOAD_FOLDER if folder == 'uploads' else RECORD_FOLDER
-    filepath = os.path.join(folder_path, filename)
-    
-    if os.path.exists(filepath) and os.path.isfile(filepath):
-        try:
-            os.remove(filepath)
-            return jsonify({'status': 'success', 'message': f'文件 {filename} 已删除'})
-        except Exception as e:
-            return jsonify({'status': 'error', 'message': f'删除文件失败: {str(e)}'})
-    else:
-        return jsonify({'status': 'error', 'message': '文件未找到'})
-
-@app.route('/download/<folder>/<filename>')
-def download_file(folder, filename):
-    if folder not in ['uploads', 'records']:
-        return jsonify({'status': 'error', 'message': '无效的文件夹'}), 404
-    
-    folder_path = UPLOAD_FOLDER if folder == 'uploads' else RECORD_FOLDER
-    return send_from_directory(folder_path, filename, as_attachment=True)
-
-def check_storage_space(min_required_mb=100):
-    """检查存储目录的可用空间，返回是否足够和详细信息"""
-    # 获取存储目录的磁盘信息
-    disk_stats = shutil.disk_usage(RECORD_FOLDER)
-    
-    # 计算可用空间（MB）
-    available_mb = disk_stats.free / (1024 **2)
-    
-    # 检查是否满足最小需求
-    is_enough = available_mb >= min_required_mb
-    
-    return {
-        'enough': is_enough,
-        'available_mb': round(available_mb, 2),
-        'required_mb': min_required_mb,
-        'total_mb': round(disk_stats.total / (1024** 2), 2),
-        'used_mb': round(disk_stats.used / (1024 **2), 2)
-    }
-
-# 修改录制API，添加存储空间检查
-@app.route('/api/start-record', methods=['POST'])
-def start_record():
-    if app_state['recording'] or app_state['transmitting']:
-        return jsonify({'success': False, 'message': 'Recording or transmission in progress'})
-    
-    if not app_state['selected_device']:
-        return jsonify({'success': False, 'message': 'No device selected'})
-    
-    # 新增：录制前检查存储空间
-    # 计算所需空间：采样率 * 时长 * 每个样本大小(4字节) / 1024^2
-    try:
-        sample_rate = int(request.json.get('sample_rate', DEFAULT_SAMPLE_RATE))
-        duration = float(request.json.get('duration', DEFAULT_DURATION))
-        # 每个复数样本包含2个int16值，共4字节
-        required_space_mb = (sample_rate * duration * 4) / (1024** 2)
-        # 增加20%的安全余量
-        required_space_mb *= 1.2
-        
-        storage_check = check_storage_space(required_space_mb)
-        if not storage_check['enough']:
-            return jsonify({
-                'success': False, 
-                'message': f'存储空间不足！需要至少 {required_space_mb:.2f} MB，仅可用 {storage_check["available_mb"]} MB'
+            fetch('/api/start-recording', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(recordData)
             })
-    except Exception as e:
-        app.logger.error(f"存储空间检查失败: {str(e)}")
-        return jsonify({'success': False, 'message': '检查存储空间时发生错误'})
-    
-    # ... 其余原有录制逻辑 ...
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'error') {
+                    alert(data.message);
+                }
+            })
+            
+            fetch('/api/start-record', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(params)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    showNotification('录制已开始', 'success');
+                } else {
+                    // 显示错误信息，包括存储不足的情况
+                    showNotification(data.message, 'danger');
+                }
+            })
+            .catch(error => {
+                showNotification('启动录制失败', 'danger');
+                console.error('Error starting recording:', error);
+            });            
+        }
 
-# 新增：获取存储空间状态的API
-@app.route('/api/storage-status')
-def get_storage_status():
-    try:
-        status = check_storage_space()
-        return jsonify(status)
-    except Exception as e:
-        app.logger.error(f"获取存储状态失败: {str(e)}")
-        return jsonify({'error': str(e)}), 500
+        // 停止录制
+        function stopRecording() {
+            if (confirm('Are you sure you want to stop recording?')) {
+                fetch('/api/stop-recording', { method: 'POST' })
+                    .catch(error => console.error('Error stopping recording:', error));
+            }
+        }
 
+        // 开始发送
+        function startTransmission() {
+            if (!appState.selectedDevice) {
+                alert('Please select a device first');
+                return;
+            }
+            
+            const filename = document.getElementById('transmit-filename').value;
+            if (!filename) {
+                alert('Please select a file to transmit');
+                return;
+            }
+            
+            const transmitData = {
+                filename: filename,
+                frequency: parseFloat(document.getElementById('transmit-frequency').value),
+                sample_rate: parseInt(document.getElementById('transmit-samplerate').value),
+                gain: parseFloat(document.getElementById('transmit-gain').value),
+                channel: parseInt(document.getElementById('transmit-channel').value)
+            };
+            
+            fetch('/api/start-transmission', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify(transmitData)
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'error') {
+                    alert(data.message);
+                }
+            })
+            .catch(error => console.error('Error starting transmission:', error));
+        }
 
-if __name__ == '__main__':
-    os.makedirs(UPLOAD_FOLDER, exist_ok=True)
-    os.makedirs(RECORD_FOLDER, exist_ok=True)
-    app.run(host='0.0.0.0', port=5000, debug=True)
+        // 停止发送
+        function stopTransmission() {
+            if (confirm('Are you sure you want to stop transmission?')) {
+                fetch('/api/stop-transmission', { method: 'POST' })
+                    .catch(error => console.error('Error stopping transmission:', error));
+            }
+        }
+
+        // 刷新文件列表
+        function refreshFileLists() {
+            fetch('/api/files')
+                .then(response => response.json())
+                .then(data => {
+                    // 更新上传文件列表
+                    const uploadedFilesList = document.getElementById('uploaded-files-list');
+                    if (data.uploads.length === 0) {
+                        uploadedFilesList.innerHTML = '<div class="text-muted">No uploaded files</div>';
+                    } else {
+                        uploadedFilesList.innerHTML = '';
+                        data.uploads.forEach(file => {
+                            addFileToUI(uploadedFilesList, file, 'uploads');
+                        });
+                    }
+                    
+                    // 更新录制文件列表
+                    const recordedFilesList = document.getElementById('recorded-files-list');
+                    if (data.records.length === 0) {
+                        recordedFilesList.innerHTML = '<div class="text-muted">No recorded files</div>';
+                    } else {
+                        recordedFilesList.innerHTML = '';
+                        data.records.forEach(file => {
+                            addFileToUI(recordedFilesList, file, 'records');
+                        });
+                    }
+                    
+                    // 更新发送文件选择下拉框
+                    const transmitSelect = document.getElementById('transmit-filename');
+                    // 保存当前选择
+                    const currentSelection = transmitSelect.value;
+                    // 清除现有选项（保留第一个）
+                    while (transmitSelect.options.length > 1) {
+                        transmitSelect.remove(1);
+                    }
+                    // 添加所有文件
+                    [...data.uploads, ...data.records].forEach(file => {
+                        const option = document.createElement('option');
+                        option.value = file;
+                        option.textContent = file;
+                        transmitSelect.appendChild(option);
+                    });
+                    // 恢复选择
+                    if (currentSelection) {
+                        transmitSelect.value = currentSelection;
+                    }
+                })
+                .catch(error => console.error('Error fetching files:', error));
+        }
+
+        // 添加文件到UI
+        function addFileToUI(container, filename, folder) {
+            const fileItem = document.createElement('div');
+            fileItem.className = 'file-item';
+            
+            fileItem.innerHTML = `
+                <span>${filename}</span>
+                <div>
+                    <a href="/download/${folder}/${encodeURIComponent(filename)}" class="btn btn-sm btn-outline-primary me-1" download>
+                        <i class="bi bi-download"></i>
+                    </a>
+                    <button class="btn btn-sm btn-outline-danger delete-file" data-folder="${folder}" data-filename="${filename}">
+                        <i class="bi bi-trash"></i>
+                    </button>
+                </div>
+            `;
+            
+            container.appendChild(fileItem);
+        }
+
+        // 委托删除文件事件
+        document.addEventListener('click', function(e) {
+            if (e.target.closest('.delete-file')) {
+                const button = e.target.closest('.delete-file');
+                const folder = button.getAttribute('data-folder');
+                const filename = button.getAttribute('data-filename');
+                
+                if (confirm(`Are you sure you want to delete ${filename}?`)) {
+                    fetch(`/api/delete-file/${folder}/${encodeURIComponent(filename)}`, {
+                        method: 'DELETE'
+                    })
+                    .then(response => response.json())
+                    .then(data => {
+                        refreshFileLists();
+                    })
+                    .catch(error => console.error('Error deleting file:', error));
+                }
+            }
+        });
+
+        // 上传文件
+        function uploadFile() {
+            const fileInput = document.getElementById('file-upload');
+            const uploadStatus = document.getElementById('upload-status');
+            
+            if (!fileInput.files || fileInput.files.length === 0) {
+                uploadStatus.textContent = 'Please select a file first';
+                uploadStatus.className = 'mt-2 text-danger';
+                return;
+            }
+            
+            const file = fileInput.files[0];
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            uploadStatus.textContent = 'Uploading...';
+            uploadStatus.className = 'mt-2 text-info';
+            
+            fetch('/api/upload', {
+                method: 'POST',
+                body: formData
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.status === 'success') {
+                    uploadStatus.textContent = `File ${data.filename} uploaded successfully`;
+                    uploadStatus.className = 'mt-2 text-success';
+                    // 清空文件输入
+                    fileInput.value = '';
+                    // 刷新文件列表
+                    refreshFileLists();
+                } else {
+                    uploadStatus.textContent = `Error: ${data.message}`;
+                    uploadStatus.className = 'mt-2 text-danger';
+                }
+                
+                // 5秒后清除状态消息
+                setTimeout(() => {
+                    uploadStatus.textContent = '';
+                    uploadStatus.className = 'mt-2 text-muted';
+                }, 5000);
+            })
+            .catch(error => {
+                uploadStatus.textContent = 'Upload failed';
+                uploadStatus.className = 'mt-2 text-danger';
+                console.error('Error uploading file:', error);
+            });
+        }
+
+        // 检查存储状态函数
+        function checkStorageStatus() {
+            fetch('/api/storage-status')
+                .then(response => response.json())
+                .then(data => {
+                    if (data.error) {
+                        console.error('获取存储状态失败:', data.error);
+                        return;
+                    }
+                    
+                    appState.storage = data;
+                    
+                    // 更新存储状态显示
+                    const warningEl = document.getElementById('storage-warning');
+                    const statusEl = document.getElementById('storage-status');
+                    const warningMsgEl = document.getElementById('storage-warning-message');
+                    const statusMsgEl = document.getElementById('storage-status-message');
+                    
+                    // 显示详细存储状态
+                    statusMsgEl.textContent = 
+                        `总空间: ${data.total_mb} MB, 已使用: ${data.used_mb} MB, 可用: ${data.available_mb} MB`;
+                    statusEl.style.display = 'block';
+                    
+                    // 如果空间不足，显示警告
+                    if (!data.enough) {
+                        warningMsgEl.textContent = 
+                            `可用空间不足（${data.available_mb} MB），可能无法完成录制。请清理空间。`;
+                        warningEl.style.display = 'block';
+                    } else {
+                        warningEl.style.display = 'none';
+                    }
+                    
+                    // 根据存储状态更新按钮
+                    updateButtonStates();
+                })
+                .catch(error => console.error('检查存储状态出错:', error));
+        }
+        
+        // 修改按钮状态更新函数
+        function updateButtonStates() {
+            const recordBtn = document.getElementById('start-record');
+            // ... 原有禁用逻辑 ...
+            
+            // 如果存储空间不足，禁用录制按钮
+            if (!appState.storage.enough) {
+                recordBtn.disabled = true;
+                recordBtn.title = "存储空间不足，无法开始录制";
+            }
+        }
+        
+        // 新增：通用通知函数
+        function showNotification(message, type = 'info') {
+            // 创建通知元素
+            const notification = document.createElement('div');
+            notification.className = `alert alert-${type} notification`;
+            notification.textContent = message;
+            notification.style.position = 'fixed';
+            notification.style.bottom = '20px';
+            notification.style.right = '20px';
+            notification.style.zIndex = '1000';
+            notification.style.padding = '15px 20px';
+            notification.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
+            
+            // 添加到页面
+            document.body.appendChild(notification);
+            
+            // 3秒后自动移除
+            setTimeout(() => {
+                notification.style.opacity = '0';
+                notification.style.transition = 'opacity 0.5s';
+                setTimeout(() => notification.remove(), 500);
+            }, 3000);
+        }     
+           
+        function generateTimestampFilename() {
+            const now = new Date();
+            const year = now.getFullYear();
+            const month = String(now.getMonth() + 1).padStart(2, '0');
+            const day = String(now.getDate()).padStart(2, '0');
+            const hours = String(now.getHours()).padStart(2, '0');
+            const minutes = String(now.getMinutes()).padStart(2, '0');
+            const seconds = String(now.getSeconds()).padStart(2, '0');
+            
+            // 格式化为YYYYMMDDHHMMSS，增加秒数以确保唯一性
+            return `${year}${month}${day}${hours}${minutes}${seconds}`;
+        }        
+    </script>
+</body>
+</html>
