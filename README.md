@@ -63,7 +63,7 @@ pip install flask flask-cors numpy uhd-python shutil
 1. 克隆仓库：
 
 ```bash
-git clone https://github.com/yourusername/usrp-signal-tool.git
+git clone https://github.com/stevenwff/usrp-signal-tool.git
 cd usrp-signal-tool
 ```
 
