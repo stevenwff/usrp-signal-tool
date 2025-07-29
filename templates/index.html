@@ -4,8 +4,10 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>USRP Signal Manager</title>
-    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/css/bootstrap.min.css" rel="stylesheet">
-    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.10.0/font/bootstrap-icons.css">
+    <link href="/static/css/bootstrap.min.css" rel="stylesheet">
+    <link  href="/static/css/bootstrap-icons.min.css" rel="stylesheet">
+    <script src="/static/js/chart.js"></script>
+    <script src="/static/js/bootstrap.bundle.min.js"></script>
     <style>
         .status-indicator {
             width: 15px;
@@ -75,6 +77,19 @@
         .device-info {
             font-size: 0.9em;
         }
+        /* 频谱分析器容器样式 */
+        #spectrum-container {
+            position: relative;
+            height: 400px;
+            width: 100%;
+            margin-top: 20px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            overflow: hidden;
+        }
+        .spectrum-controls {
+            margin-bottom: 15px;
+        }
     </style>
 </head>
 <body>
@@ -121,6 +136,11 @@
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="files-tab" data-bs-toggle="tab" data-bs-target="#files" type="button" role="tab" aria-controls="files" aria-selected="false">
                     <i class="bi bi-files"></i> File Management
+                </button>
+            </li>
+            <li class="nav-item" role="presentation">
+                <button class="nav-link" id="spectrum-tab" data-bs-toggle="tab" data-bs-target="#spectrum" type="button" role="tab" aria-controls="spectrum" aria-selected="false">
+                    <i class="bi bi-bar-chart"></i> Spectrum Analyzer
                 </button>
             </li>
         </ul>
@@ -292,10 +312,94 @@
                     </div>
                 </div>
             </div>
+
+            <!-- Spectrum Analyzer Tab -->
+            <div class="tab-pane fade" id="spectrum" role="tabpanel" aria-labelledby="spectrum-tab">
+                <div class="card mt-3">
+                    <div class="card-header bg-info text-white">
+                        <h2 class="h5 mb-0">Spectrum Analyzer</h2>
+                    </div>
+                    <div class="card-body">
+                        <div class="row spectrum-controls">
+                            <div class="col-md-6">
+                                <div class="param-group">
+                                    <label for="spectrum-filename" class="form-label">Select IQ File</label>
+                                    <select class="form-select" id="spectrum-filename" required>
+                                        <option value="">Select a file...</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="param-group">
+                                    <label for="spectrum-sample-rate" class="form-label">Sample Rate (samples/sec)</label>
+                                    <input type="number" class="form-control" id="spectrum-sample-rate" value="7680000" min="100000" step="100000" required>
+                                </div>
+                            </div>
+                            <div class="col-md-2 d-flex align-items-end">
+                                <button type="button" id="generate-spectrum" class="btn btn-info w-100">
+                                    <i class="bi bi-bar-chart"></i> Generate
+                                </button>
+                            </div>
+                        </div>
+
+                        <div id="spectrum-loading" style="display: none; margin-top: 10px;">
+                            <div class="spinner"></div>
+                            <span class="ms-2">Generating spectrum...</span>
+                        </div>
+                        
+                        <div class="row mt-3">
+                            <div class="col-md-12">
+                                <div id="spectrum-container"></div>
+                            </div>
+                        </div>
+
+                        <!-- Spectrum Controls -->
+                        <div class="row mt-4">
+                            <div class="col-md-4">
+                                <div class="param-group">
+                                    <label for="freq-center" class="form-label">Center Frequency (Hz)</label>
+                                    <input type="number" class="form-control" id="freq-center" value="634000000" step="100000">
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="param-group">
+                                    <label for="freq-span" class="form-label">Frequency Span (Hz)</label>
+                                    <select class="form-select" id="freq-span">
+                                        <option value="100000">100 kHz</option>
+                                        <option value="500000">500 kHz</option>
+                                        <option value="1000000" selected>1 MHz</option>
+                                        <option value="5000000">5 MHz</option>
+                                        <option value="10000000">10 MHz</option>
+                                    </select>
+                                </div>
+                            </div>
+                            <div class="col-md-4">
+                                <div class="param-group">
+                                    <label for="db-range" class="form-label">Amplitude Range (dB)</label>
+                                    <select class="form-select" id="db-range">
+                                        <option value="20">20 dB</option>
+                                        <option value="40" selected>40 dB</option>
+                                        <option value="60">60 dB</option>
+                                        <option value="80">80 dB</option>
+                                        <option value="100">100 dB</option>
+                                    </select>
+                                </div>
+                            </div>
+                        </div>
+
+                        <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
+                            <button type="button" id="refresh-spectrum" class="btn btn-outline-secondary">
+                                <i class="bi bi-arrow-clockwise"></i> Refresh
+                            </button>
+                            <button type="button" id="save-spectrum" class="btn btn-outline-primary">
+                                <i class="bi bi-download"></i> Save Image
+                            </button>
+                        </div>
+                    </div>
+                </div>
+            </div>
         </div>
     </div>
-
-    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0-alpha1/dist/js/bootstrap.bundle.min.js"></script>
     <script>
         // 全局状态
         let appState = {
@@ -306,7 +410,8 @@
                 enough: true,
                 available_mb: 0,
                 required_mb: 0
-            }
+            },
+            spectrumChart: null // 存储频谱图表实例
         };
 
         // 页面加载完成后初始化
@@ -344,7 +449,19 @@
             
             // 检查存储状态
             checkStorageStatus();
-            updateRecordSizeHint(); // 添加这行
+            updateRecordSizeHint();
+
+            // 频谱分析器初始化
+            initSpectrumFileSelect();
+            document.getElementById('generate-spectrum').addEventListener('click', generateSpectrum);
+            document.getElementById('refresh-spectrum').addEventListener('click', generateSpectrum);
+            document.getElementById('save-spectrum').addEventListener('click', saveSpectrumImage);
+            
+            // 频谱控制变更事件
+            document.getElementById('freq-center').addEventListener('change', updateSpectrumView);
+            document.getElementById('freq-span').addEventListener('change', updateSpectrumView);
+            document.getElementById('db-range').addEventListener('change', updateSpectrumView);
+
             // 每30秒检查一次存储状态
             setInterval(checkStorageStatus, 30000);            
         });
@@ -496,7 +613,6 @@
                     if (data.progress !== undefined) {
                         // 更新进度条
                         const progressBar = document.getElementById('transmit-progress-bar');
-                        // const progressPercentage = document.getElementById('transmit-progress-percentage');
                         const timeDetails = document.getElementById('transmit-time-details');
                         const progressContainer = document.getElementById('transmit-progress-container');
                         
@@ -505,7 +621,6 @@
                         
                         // 更新进度数据
                         progressBar.style.width = `${data.progress}%`;
-                        // progressPercentage.textContent = `${data.progress}%`;
                         
                         // 格式化时间（转换为分:秒）
                         const formatTime = (seconds) => {
@@ -671,6 +786,9 @@
                     if (currentSelection) {
                         transmitSelect.value = currentSelection;
                     }
+
+                    // 更新频谱分析器文件选择下拉框
+                    updateSpectrumFileSelect(data);
                 })
                 .catch(error => console.error('Error fetching files:', error));
         }
@@ -715,163 +833,256 @@
             }
         });
 
-        function uploadFile() {
-            const fileInput = document.getElementById('file-upload');
-            const statusContainer = document.getElementById('upload-status-container');
-            const uploadStatus = document.getElementById('upload-status');
-            const uploadProgress = document.getElementById('upload-progress');
-            const uploadPercentage = document.getElementById('upload-percentage');
-            const uploadDetails = document.getElementById('upload-details');
+        // 初始化频谱分析器文件选择
+        function initSpectrumFileSelect() {
+            fetch('/api/files')
+                .then(response => response.json())
+                .then(data => {
+                    updateSpectrumFileSelect(data);
+                });
+        }
+
+        // 更新频谱分析器文件选择下拉框
+        function updateSpectrumFileSelect(data) {
+            const spectrumSelect = document.getElementById('spectrum-filename');
+            const currentSelection = spectrumSelect.value;
             
-            // 检查文件选择
-            if (!fileInput.files || fileInput.files.length === 0) {
-                uploadStatus.textContent = 'Please select a file first';
-                uploadStatus.className = 'mt-2 text-danger';
+            // 清除现有选项（保留第一个）
+            while (spectrumSelect.options.length > 1) {
+                spectrumSelect.remove(1);
+            }
+            
+            // 添加所有文件
+            [...data.uploads, ...data.records].forEach(file => {
+                const option = document.createElement('option');
+                option.value = file;
+                option.textContent = file;
+                spectrumSelect.appendChild(option);
+            });
+            
+            // 恢复选择
+            if (currentSelection) {
+                spectrumSelect.value = currentSelection;
+            }
+        }
+
+        // 生成频谱图
+        function generateSpectrum() {
+            const filename = document.getElementById('spectrum-filename').value;
+            const sampleRate = parseInt(document.getElementById('spectrum-sample-rate').value);
+            const centerFreq = parseInt(document.getElementById('freq-center').value);
+            
+            if (!filename) {
+                alert('Please select a file first');
                 return;
             }
             
-            const file = fileInput.files[0];
-            const formData = new FormData();
-            formData.append('file', file);
+            // 显示加载状态
+            document.getElementById('spectrum-loading').style.display = 'block';
             
-            // 显示上传状态区域
-            statusContainer.classList.remove('hidden');
-            uploadStatus.textContent = 'Uploading...';
-            uploadStatus.className = 'mt-2 text-info';
-            uploadProgress.style.width = '0%';
-            uploadProgress.style.backgroundColor = '#3b82f6'; // 重置为蓝色
-            
-            // 使用XHR替代fetch以获取进度
-            const xhr = new XMLHttpRequest();
-            xhr.open('POST', '/api/upload', true);
-            
-            // 上传进度处理
-            xhr.upload.addEventListener('progress', function(e) {
-                if (e.lengthComputable) {
-                    const percentComplete = (e.loaded / e.total) * 100;
-                    uploadProgress.style.width = percentComplete + '%';
-                    uploadPercentage.textContent = percentComplete.toFixed(1) + '%';
-                    
-                    // 格式化文件大小
-                    const uploadedMB = (e.loaded / (1024 * 1024)).toFixed(2);
-                    const totalMB = (e.total / (1024 * 1024)).toFixed(2);
-                    uploadDetails.textContent = `${uploadedMB} MB / ${totalMB} MB`;
+            // 发送请求生成频谱数据
+            fetch('/api/generate-spectrum', {
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                body: JSON.stringify({
+                    filename: filename,
+                    sample_rate: sampleRate,
+                    center_freq: centerFreq
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                // 隐藏加载状态
+                document.getElementById('spectrum-loading').style.display = 'none';
+                
+                if (data.error) {
+                    alert(data.error);
+                    return;
                 }
+                
+                // 绘制频谱图
+                plotSpectrum(data);
+            })
+            .catch(error => {
+                console.error('Error generating spectrum:', error);
+                document.getElementById('spectrum-loading').style.display = 'none';
+                alert('Failed to generate spectrum');
             });
-            
-            // 上传完成处理
-            xhr.addEventListener('load', function() {
-                if (xhr.status >= 200 && xhr.status < 300) {
-                    try {
-                        const response = JSON.parse(xhr.responseText);
-                        if (response.status === 'success') {
-                            uploadStatus.textContent = `File ${response.filename} uploaded successfully`;
-                            uploadStatus.className = 'mt-2 text-success';
-                            uploadProgress.style.backgroundColor = '#10b981'; // 成功时变绿色
-                            fileInput.value = '';
-                            refreshFileLists();
-                        } else {
-                            uploadStatus.textContent = `Error: ${response.message || 'Unknown error'}`;
-                            uploadStatus.className = 'mt-2 text-danger';
-                        }
-                    } catch (e) {
-                        uploadStatus.textContent = 'Upload completed but invalid response received';
-                        uploadStatus.className = 'mt-2 text-warning';
-                    }
-                } else {
-                    uploadStatus.textContent = `Server error: ${xhr.statusText}`;
-                    uploadStatus.className = 'mt-2 text-danger';
-                }
-            });
-            
-            // 错误和中断处理
-            xhr.addEventListener('error', function() {
-                uploadStatus.textContent = 'Upload failed. Please try again.';
-                uploadStatus.className = 'mt-2 text-danger';
-            });
-            
-            xhr.addEventListener('abort', function() {
-                uploadStatus.textContent = 'Upload aborted.';
-                uploadStatus.className = 'mt-2 text-warning';
-            });
-            
-            // 发送请求
-            xhr.send(formData);
         }
 
-        // 检查存储状态函数
+        // 绘制频谱图
+        function plotSpectrum(data) {
+            const container = document.getElementById('spectrum-container');
+            const canvas = document.createElement('canvas');
+            
+            // 清除现有内容
+            container.innerHTML = '';
+            container.appendChild(canvas);
+            
+            // 准备图表数据
+            const frequencies = data.frequencies;
+            const amplitudes = data.amplitudes;
+            
+            // 如果已有图表实例，销毁它
+            if (appState.spectrumChart) {
+                appState.spectrumChart.destroy();
+            }
+            
+            // 创建新图表
+            appState.spectrumChart = new Chart(canvas, {
+                type: 'line',
+                data: {
+                    labels: frequencies,
+                    datasets: [{
+                        label: 'Amplitude (dB)',
+                        data: amplitudes,
+                        borderColor: '#0d6efd',
+                        backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                        borderWidth: 1,
+                        fill: true,
+                        tension: 0.1,
+                        pointRadius: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        x: {
+                            title: {
+                                display: true,
+                                text: 'Frequency (Hz)',
+                                font: {
+                                    weight: 'bold'
+                                }
+                            },
+                            ticks: {
+                                callback: function(value) {
+                                    // 格式化频率显示
+                                    const freq = this.getLabelForValue(value);
+                                    if (freq >= 1e9) {
+                                        return (freq / 1e9).toFixed(2) + ' GHz';
+                                    } else if (freq >= 1e6) {
+                                        return (freq / 1e6).toFixed(2) + ' MHz';
+                                    } else if (freq >= 1e3) {
+                                        return (freq / 1e3).toFixed(2) + ' kHz';
+                                    }
+                                    return freq + ' Hz';
+                                }
+                            }
+                        },
+                        y: {
+                            title: {
+                                display: true,
+                                text: 'Amplitude (dB)',
+                                font: {
+                                    weight: 'bold'
+                                }
+                            }
+                        }
+                    },
+                    interaction: {
+                        intersect: false,
+                        mode: 'index'
+                    },
+                    plugins: {
+                        tooltip: {
+                            callbacks: {
+                                title: function(tooltipItems) {
+                                    const freq = tooltipItems[0].label;
+                                    if (freq >= 1e9) {
+                                        return (freq / 1e9).toFixed(4) + ' GHz';
+                                    } else if (freq >= 1e6) {
+                                        return (freq / 1e6).toFixed(4) + ' MHz';
+                                    } else if (freq >= 1e3) {
+                                        return (freq / 1e3).toFixed(4) + ' kHz';
+                                    }
+                                    return freq + ' Hz';
+                                }
+                            }
+                        }
+                    }
+                }
+            });
+        }
+
+        // 更新频谱视图（基于当前控制值）
+        function updateSpectrumView() {
+            if (appState.spectrumChart) {
+                // 这里可以实现基于当前控制值的频谱视图更新
+                // 例如：调整频率范围、振幅范围等
+                generateSpectrum(); // 简单处理：重新生成频谱
+            }
+        }
+
+        // 保存频谱图像
+        function saveSpectrumImage() {
+            if (!appState.spectrumChart) {
+                alert('No spectrum to save. Generate one first.');
+                return;
+            }
+            
+            // 获取图表的canvas元素
+            const canvas = appState.spectrumChart.canvas;
+            
+            // 创建下载链接
+            const link = document.createElement('a');
+            link.download = `spectrum_${new Date().getTime()}.png`;
+            link.href = canvas.toDataURL('image/png');
+            link.click();
+        }
+
+        // 计算录制文件大小
+        function calculateRecordSize() {
+            const duration = parseFloat(document.getElementById('record-duration').value);
+            const sampleRate = parseInt(document.getElementById('record-samplerate').value);
+            // 假设每个样本是8字节（I和Q各4字节）
+            const bytesPerSecond = sampleRate * 8;
+            const totalBytes = bytesPerSecond * duration;
+            // 转换为MB (1 MB = 1024 * 1024 bytes)
+            return totalBytes / (1024 * 1024);
+        }
+
+        // 更新录制文件大小提示
+        function updateRecordSizeHint() {
+            const sizeMB = calculateRecordSize();
+            document.getElementById('record-size-hint').textContent = `预估文件大小: ${sizeMB.toFixed(2)} MB`;
+        }
+
+        // 检查存储状态
         function checkStorageStatus() {
+            const requiredMB = calculateRecordSize();
+            
             fetch('/api/storage-status')
                 .then(response => response.json())
                 .then(data => {
-                    if (data.error) {
-                        console.error('获取存储状态失败:', data.error);
-                        return;
-                    }
+                    appState.storage = {
+                        enough: data.available_mb > requiredMB + 1024, // 保留1GB空间
+                        available_mb: data.available_mb,
+                        required_mb: requiredMB
+                    };
                     
-                    appState.storage = data;
+                    const storageWarning = document.getElementById('storage-warning');
+                    const storageStatus = document.getElementById('storage-status');
+                    const warningMessage = document.getElementById('storage-warning-message');
+                    const statusMessage = document.getElementById('storage-status-message');
                     
-                    // 更新存储状态显示
-                    const warningEl = document.getElementById('storage-warning');
-                    const statusEl = document.getElementById('storage-status');
-                    const warningMsgEl = document.getElementById('storage-warning-message');
-                    const statusMsgEl = document.getElementById('storage-status-message');
-                    
-                    // 显示详细存储状态
-                    statusMsgEl.textContent = 
-                        `总空间: ${data.total_mb} MB, 已使用: ${data.used_mb} MB, 可用: ${data.available_mb} MB`;
-                    statusEl.style.display = 'block';
-                    
-                    // 如果空间不足，显示警告
-                    if (!data.enough) {
-                        warningMsgEl.textContent = 
-                            `可用空间不足（${data.available_mb} MB），可能无法完成录制。请清理空间。`;
-                        warningEl.style.display = 'block';
+                    if (!appState.storage.enough) {
+                        storageWarning.style.display = 'block';
+                        storageStatus.style.display = 'none';
+                        warningMessage.textContent = `需要: ${appState.storage.required_mb.toFixed(2)} MB, 可用: ${appState.storage.available_mb.toFixed(2)} MB, 请至少保留1GB空闲空间`;
                     } else {
-                        warningEl.style.display = 'none';
+                        storageWarning.style.display = 'none';
+                        storageStatus.style.display = 'block';
+                        statusMessage.textContent = `可用空间: ${(appState.storage.available_mb / 1024).toFixed(2)} GB`;
                     }
-                    
-                    // 根据存储状态更新按钮
-                    updateButtonStates();
                 })
-                .catch(error => console.error('检查存储状态出错:', error));
+                .catch(error => console.error('Error checking storage status:', error));
         }
-        
-        // 修改按钮状态更新函数
-        function updateButtonStates() {
-            const recordBtn = document.getElementById('start-record');
-            
-            // 如果存储空间不足，禁用录制按钮
-            if (!appState.storage.enough) {
-                recordBtn.disabled = true;
-                recordBtn.title = "存储空间不足，无法开始录制";
-            }
-        }
-        
-        // 通用通知函数
-        function showNotification(message, type = 'info') {
-            // 创建通知元素
-            const notification = document.createElement('div');
-            notification.className = `alert alert-${type} notification`;
-            notification.textContent = message;
-            notification.style.position = 'fixed';
-            notification.style.bottom = '20px';
-            notification.style.right = '20px';
-            notification.style.zIndex = '1000';
-            notification.style.padding = '15px 20px';
-            notification.style.boxShadow = '0 4px 6px rgba(0,0,0,0.1)';
-            
-            // 添加到页面
-            document.body.appendChild(notification);
-            
-            // 3秒后自动移除
-            setTimeout(() => {
-                notification.style.opacity = '0';
-                notification.style.transition = 'opacity 0.5s';
-                setTimeout(() => notification.remove(), 500);
-            }, 3000);
-        }     
-           
+
+        // 生成带时间戳的文件名
         function generateTimestampFilename() {
             const now = new Date();
             const year = now.getFullYear();
@@ -881,22 +1092,84 @@
             const minutes = String(now.getMinutes()).padStart(2, '0');
             const seconds = String(now.getSeconds()).padStart(2, '0');
             
-            // 格式化为YYYYMMDDHHMMSS，增加秒数以确保唯一性
-            return `${year}${month}${day}${hours}${minutes}${seconds}`;
+            
+            return `recording_${year}${month}${day}_${hours}${minutes}${seconds}`;
         }
-        function calculateRecordSize() {
-            const duration = parseFloat(document.getElementById('record-duration').value) || 0;
-            const sampleRate = parseInt(document.getElementById('record-samplerate').value) || 0;
-            // IQ数据每个样本8字节（2个int16）
-            const sizeMB = (duration * sampleRate * 4) / (1024 * 1024);
-            return sizeMB;
-        }      
-        // 更新预估大小显示
-        function updateRecordSizeHint() {
-            const sizeMB = calculateRecordSize();
-            document.getElementById('record-size-hint').textContent = 
-                `预估文件大小: ${sizeMB.toFixed(2)} MB`;
-        }                  
+
+        // 更新按钮状态
+        function updateButtonStates() {
+            // 可以在这里集中管理所有按钮的状态
+        }
+
+        // 文件上传功能
+        function uploadFile() {
+            const fileInput = document.getElementById('file-upload');
+            const file = fileInput.files[0];
+            
+            if (!file) {
+                showAlert('请选择要上传的文件', 'warning');
+                return;
+            }
+            
+            // 显示上传进度容器（修复原代码中使用hidden类的问题）
+            const statusContainer = document.getElementById('upload-status-container');
+            statusContainer.style.display = 'block';  // 改为直接设置display属性
+            
+            const formData = new FormData();
+            formData.append('file', file);
+            
+            const xhr = new XMLHttpRequest();
+            xhr.open('POST', '/api/upload', true);
+            
+            xhr.upload.addEventListener('progress', function(e) {
+                if (e.lengthComputable) {
+                    const percent = (e.loaded / e.total) * 100;
+                    document.getElementById('upload-progress').style.width = percent + '%';
+                    document.getElementById('upload-percentage').textContent = Math.round(percent) + '%';
+                    
+                    const loadedMB = (e.loaded / (1024 * 1024)).toFixed(2);
+                    const totalMB = (e.total / (1024 * 1024)).toFixed(2);
+                    document.getElementById('upload-details').textContent = `${loadedMB} MB / ${totalMB} MB`;
+                }
+            });
+            
+            xhr.onload = function() {
+                if (xhr.status === 200) {
+                    showAlert('文件上传成功', 'success');
+                    refreshFileLists();  // 上传成功后刷新文件列表
+                    fileInput.value = '';  // 清空文件选择
+                } else {
+                    showAlert('文件上传失败: ' + xhr.responseText, 'danger');
+                }
+                statusContainer.style.display = 'none';  // 隐藏进度容器
+            };
+            
+            xhr.onerror = function() {
+                showAlert('上传发生错误', 'danger');
+                statusContainer.style.display = 'none';
+            };
+            
+            xhr.send(formData);
+        }
+
+        // 添加提示信息显示函数
+        function showAlert(message, type) {
+            const systemStatus = document.getElementById('system-status');
+            systemStatus.className = `alert alert-${type}`;
+            systemStatus.innerHTML = message;
+            
+            // 3秒后恢复原始状态
+            setTimeout(() => {
+                systemStatus.className = 'alert alert-info';
+                systemStatus.innerHTML = '<span id="status-text">Ready</span><span id="activity-indicator" style="display: none;" class="spinner ms-2"></span>';
+            }, 3000);
+        }        
+
+        // 显示通知
+        function showNotification(message, type = 'info') {
+            // 可以实现一个通知系统
+            alert(message);
+        }
     </script>
 </body>
 </html>
