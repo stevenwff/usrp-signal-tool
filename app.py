@@ -9,6 +9,8 @@ from flask_cors import CORS
 import uhd
 import shutil
 from uhd import usrp
+from scipy.fft import fft, fftshift
+import math
 
 # 创建Flask应用实例
 app = Flask(__name__)
@@ -808,6 +810,74 @@ def start_recording():
     app_state['record_thread'].start()
     
     return jsonify({'success': True, 'message': 'Recording started'})    
+
+@app.route('/api/generate-spectrum', methods=['POST'])
+def generate_spectrum():
+    try:
+        data = request.json
+        filename = data.get('filename')
+        sample_rate = int(data.get('sample_rate', 7680000))
+        
+        if not filename:
+            return jsonify({'status': 'error', 'message': 'No filename provided'})
+        
+        # 查找文件
+        full_path = None
+        possible_paths = [
+            os.path.join(RECORD_FOLDER, filename),
+            os.path.join(UPLOAD_FOLDER, filename)
+        ]
+        
+        if not any(filename.endswith(ext) for ext in ('.iq', '.bin', '.dat')):
+            for ext in ('.iq', '.bin', '.dat'):
+                possible_paths.insert(0, os.path.join(RECORD_FOLDER, filename + ext))
+                possible_paths.append(os.path.join(UPLOAD_FOLDER, filename + ext))
+        
+        for path in possible_paths:
+            if os.path.exists(path) and os.path.isfile(path):
+                full_path = path
+                break
+        
+        if not full_path:
+            return jsonify({'status': 'error', 'message': f'File {filename} not found'})
+        
+        # 读取IQ文件（只读取前1MB数据用于频谱分析，避免内存占用过大）
+        max_bytes = 1024 * 1024  # 1MB
+        file_size = os.path.getsize(full_path)
+        read_bytes = min(max_bytes, file_size)
+        
+        with open(full_path, 'rb') as f:
+            iq_data = np.fromfile(f, dtype=np.int16, count=read_bytes // 2)
+        
+        # 转换为复数IQ信号
+        iq_samples = iq_data[0::2] + 1j * iq_data[1::2]
+        iq_samples = iq_samples.astype(np.complex64) / 32768.0  # 归一化
+        
+        # 计算FFT
+        n = len(iq_samples)
+        fft_result = fft(iq_samples, n)
+        fft_result = fftshift(fft_result)
+        
+        # 计算频率轴
+        frequencies = np.linspace(-sample_rate/2, sample_rate/2, n)
+        
+        # 计算幅度（dB）
+        amplitudes = 20 * np.log10(np.abs(fft_result) + 1e-10)  # 加小值避免log(0)
+        
+        # 降采样以减少数据点数量，加快前端渲染
+        downsample_factor = max(1, n // 1000)  # 最多1000个点
+        frequencies = frequencies[::downsample_factor].tolist()
+        amplitudes = amplitudes[::downsample_factor].tolist()
+        
+        return jsonify({
+            'status': 'success',
+            'frequencies': frequencies,
+            'amplitudes': amplitudes
+        })
+        
+    except Exception as e:
+        app.logger.error(f"Error generating spectrum: {str(e)}")
+        return jsonify({'status': 'error', 'message': str(e)})
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)
