@@ -11,6 +11,7 @@ import shutil
 from uhd import usrp
 from scipy.fft import fft, fftshift
 import math
+import select, errno
 
 # 创建Flask应用实例
 app = Flask(__name__)
@@ -57,7 +58,9 @@ app_state = {
         'sent_samples': 0
     },
     'transmission_timer': None,  # 计时器线程
-    'transmission_start_time': 0  # 发送开始时间
+    'transmission_start_time': 0,  # 发送开始时间
+    'usrp_status': 'OK',        # OK | O | U | LOST
+    'usrp_status_msg': ''
 }
 
 # 设备地址模式
@@ -256,18 +259,32 @@ def c_record_thread_func(params):
             bufsize=1  # 行缓冲
         )
 
-        # ✅ 实时读取输出
-        # 每隔100ms读取一次，避免阻塞
+        # ✅ 非阻塞读取 + 实时解析 O/U
+        fd = app_state['record_process'].stdout.fileno()
+        os.set_blocking(fd, False)
+        buffer = ''
         while True:
             if app_state['stop_event'].is_set():
                 break
-            try:
-                chunk = app_state['record_process'].stdout.read(128)
-                if not chunk:
-                    break
-                app.logger.info(f"[RX_C] {chunk.strip()}")
-            except:
-                break
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                try:
+                    chunk = os.read(fd, 128).decode('utf-8', errors='ignore')
+                    if not chunk:
+                        break
+                    app.logger.info(f"[RX_C] {chunk.strip()}")
+                    # 解析 O / U
+                    if 'O' in chunk:
+                        app_state['usrp_status'] = 'O'
+                        app_state['usrp_status_msg'] = 'Overrun'
+                    if 'U' in chunk:
+                        app_state['usrp_status'] = 'U'
+                        app_state['usrp_status_msg'] = 'Underrun'
+                except BlockingIOError:
+                    pass
+            else:
+                app_state['usrp_status'] = 'OK'
+                app_state['usrp_status_msg'] = ''    
 
 
         # ✅ 等待进程结束
@@ -283,6 +300,15 @@ def c_record_thread_func(params):
     except Exception as e:
         app.logger.error(f"C程序录制错误: {str(e)}")
     finally:
+        if app_state['record_process']:
+            try:
+                app_state['record_process'].terminate()
+                app_state['record_process'].wait(timeout=2)
+            except:
+                pass
+        # ✅ 重置 USRP 状态
+        app_state['usrp_status'] = 'OK'
+        app_state['usrp_status_msg'] = ''
         app_state['recording'] = False
         app_state['stop_event'].clear()
         app_state['record_thread'] = None
@@ -553,17 +579,32 @@ def c_transmit_thread_func(params):
         app_state['transmission_timer'] = threading.Thread(target=update_progress_periodically, daemon=True)
         app_state['transmission_timer'].start()
 
-        # 每隔100ms读取一次，避免阻塞
+        # ✅ 非阻塞读取 + 实时解析 O/U
+        fd = app_state['transmit_process'].stdout.fileno()
+        os.set_blocking(fd, False)
+        buffer = ''
         while True:
             if app_state['stop_event'].is_set():
                 break
-            try:
-                chunk = app_state['transmit_process'].stdout.read(128)
-                if not chunk:
-                    break
-                app.logger.info(f"[TX_C] {chunk.strip()}")
-            except:
-                break            
+            ready, _, _ = select.select([fd], [], [], 0.1)
+            if ready:
+                try:
+                    chunk = os.read(fd, 128).decode('utf-8', errors='ignore')
+                    if not chunk:
+                        break
+                    app.logger.info(f"[TX_C] {chunk.strip()}")
+                    # 解析 O / U
+                    if 'O' in chunk:
+                        app_state['usrp_status'] = 'O'
+                        app_state['usrp_status_msg'] = 'Overrun'
+                    if 'U' in chunk:
+                        app_state['usrp_status'] = 'U'
+                        app_state['usrp_status_msg'] = 'Underrun'
+                except BlockingIOError:
+                    pass
+            else:
+                app_state['usrp_status'] = 'OK'
+                app_state['usrp_status_msg'] = ''                
 
         # 7. 等待进程结束
         app_state['transmit_process'].wait()
@@ -577,6 +618,14 @@ def c_transmit_thread_func(params):
     except Exception as e:
         app.logger.error(f"C程序发送错误: {str(e)}")
     finally:
+        if app_state['transmit_process']:
+            try:
+                app_state['transmit_process'].terminate()
+                app_state['transmit_process'].wait(timeout=2)
+            except:
+                pass        
+        app_state['usrp_status'] = 'OK'
+        app_state['usrp_status_msg'] = ''
         # 清理
         if app_state['transmission_timer']:
             app_state['transmission_timer'] = None
@@ -883,6 +932,13 @@ def generate_spectrum():
     except Exception as e:
         app.logger.error(f"Error generating spectrum: {str(e)}")
         return jsonify({'status': 'error', 'message': str(e)})
+
+@app.route('/api/usrp-status')
+def get_usrp_status():
+    return jsonify({
+        'status': app_state['usrp_status'],  # OK / O / U / LOST
+        'msg':    app_state['usrp_status_msg']
+    })        
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

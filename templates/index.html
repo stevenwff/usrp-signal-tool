@@ -90,6 +90,13 @@
         .spectrum-controls {
             margin-bottom: 15px;
         }
+        .indicator {
+        display:inline-block;
+        width:12px; height:12px; border-radius:50%; margin-left:6px;
+        }
+        .indicator.ok   { background:green; }
+        .indicator.warn { background:red; animation:blink 1s infinite; }
+        @keyframes blink { 0%{opacity:1} 50%{opacity:.2} 100%{opacity:1} }
     </style>
 </head>
 <body>
@@ -115,9 +122,17 @@
                         <span class="ms-2">Discovering devices...</span>
                     </div>
                 </div>
-                <button id="refresh-devices" class="btn btn-outline-secondary mt-3">
-                    <i class="bi bi-arrow-clockwise"></i> Refresh Devices
-                </button>
+                <!-- USRP状态灯 -->
+                <div class="d-flex align-items-center justify-content-between mt-3">
+                    <div class="d-flex align-items-center">
+                        <span class="me-2">USRP status:</span>
+                        <span id="usrp-indicator" class="indicator me-2" title="正常"></span>
+                        <small id="usrp-msg" class="text-muted"></small>
+                    </div>
+                    <button id="refresh-devices" class="btn btn-outline-secondary btn-sm">
+                        <i class="bi bi-arrow-clockwise"></i> Refresh Devices
+                    </button>
+                </div>
             </div>
         </div>
 
@@ -353,40 +368,6 @@
                             </div>
                         </div>
 
-                        <!-- Spectrum Controls -->
-                        <div class="row mt-4">
-                            <div class="col-md-4">
-                                <div class="param-group">
-                                    <label for="freq-center" class="form-label">Center Frequency (Hz)</label>
-                                    <input type="number" class="form-control" id="freq-center" value="634000000" step="100000">
-                                </div>
-                            </div>
-                            <div class="col-md-4">
-                                <div class="param-group">
-                                    <label for="freq-span" class="form-label">Frequency Span (Hz)</label>
-                                    <select class="form-select" id="freq-span">
-                                        <option value="100000">100 kHz</option>
-                                        <option value="500000">500 kHz</option>
-                                        <option value="1000000" selected>1 MHz</option>
-                                        <option value="5000000">5 MHz</option>
-                                        <option value="10000000">10 MHz</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <div class="col-md-4">
-                                <div class="param-group">
-                                    <label for="db-range" class="form-label">Amplitude Range (dB)</label>
-                                    <select class="form-select" id="db-range">
-                                        <option value="20">20 dB</option>
-                                        <option value="40" selected>40 dB</option>
-                                        <option value="60">60 dB</option>
-                                        <option value="80">80 dB</option>
-                                        <option value="100">100 dB</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-
                         <div class="d-grid gap-2 d-md-flex justify-content-md-end mt-4">
                             <button type="button" id="refresh-spectrum" class="btn btn-outline-secondary">
                                 <i class="bi bi-arrow-clockwise"></i> Refresh
@@ -457,11 +438,6 @@
             document.getElementById('refresh-spectrum').addEventListener('click', generateSpectrum);
             document.getElementById('save-spectrum').addEventListener('click', saveSpectrumImage);
             
-            // 频谱控制变更事件
-            document.getElementById('freq-center').addEventListener('change', updateSpectrumView);
-            document.getElementById('freq-span').addEventListener('change', updateSpectrumView);
-            document.getElementById('db-range').addEventListener('change', updateSpectrumView);
-
             // 每30秒检查一次存储状态
             setInterval(checkStorageStatus, 30000);            
         });
@@ -870,7 +846,6 @@
         function generateSpectrum() {
             const filename = document.getElementById('spectrum-filename').value;
             const sampleRate = parseInt(document.getElementById('spectrum-sample-rate').value);
-            const centerFreq = parseInt(document.getElementById('freq-center').value);
             
             if (!filename) {
                 alert('Please select a file first');
@@ -888,8 +863,7 @@
                 },
                 body: JSON.stringify({
                     filename: filename,
-                    sample_rate: sampleRate,
-                    center_freq: centerFreq
+                    sample_rate: sampleRate
                 })
             })
             .then(response => response.json())
@@ -1170,7 +1144,31 @@
             // 可以实现一个通知系统
             alert(message);
         }
-        
+
+        function pollUsrpStatus() {
+            fetch('/api/usrp-status')
+                .then(r => r.json())
+                .then(d => {
+                const ind = document.getElementById('usrp-indicator');
+                const msg = document.getElementById('usrp-msg');
+                ind.className = 'indicator';
+                if (d.status === 'OK') {
+                    ind.classList.add('ok');
+                    msg.textContent = '';
+                } else if (d.status === 'O' || d.status === 'U') {
+                    ind.classList.add('warn');
+                    msg.textContent = d.msg;
+                } else {
+                    ind.classList.add('ok');   // 也可以改成灰色 LOST
+                    msg.textContent = '';
+                }
+                })
+                .catch(() => {
+                document.getElementById('usrp-indicator').className = 'indicator warn';
+                document.getElementById('usrp-msg').textContent = '通信中断';
+                });
+            }
+            setInterval(pollUsrpStatus, 200);   // 每 500 ms 刷新        
     </script>
 </body>
 </html>
