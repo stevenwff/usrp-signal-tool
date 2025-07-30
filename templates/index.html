@@ -962,12 +962,12 @@
                                 callback: function(value) {
                                     // 格式化频率显示
                                     const freq = this.getLabelForValue(value);
-                                    if (freq >= 1e9) {
-                                        return (freq / 1e9).toFixed(2) + ' GHz';
-                                    } else if (freq >= 1e6) {
-                                        return (freq / 1e6).toFixed(2) + ' MHz';
-                                    } else if (freq >= 1e3) {
-                                        return (freq / 1e3).toFixed(2) + ' kHz';
+                                    if (Math.abs(freq) >= 1e9) {
+                                        return (freq / 1e9).toFixed(1) + ' GHz';
+                                    } else if (Math.abs(freq) >= 1e6) {
+                                        return (freq / 1e6).toFixed(1) + ' MHz';
+                                    } else if (Math.abs(freq) >= 1e3) {
+                                        return (freq / 1e3).toFixed(1) + ' kHz';
                                     }
                                     return freq + ' Hz';
                                 }
@@ -992,11 +992,11 @@
                             callbacks: {
                                 title: function(tooltipItems) {
                                     const freq = tooltipItems[0].label;
-                                    if (freq >= 1e9) {
+                                    if (Math.abs(freq) >= 1e9) {
                                         return (freq / 1e9).toFixed(4) + ' GHz';
-                                    } else if (freq >= 1e6) {
+                                    } else if (Math.abs(freq) >= 1e6) {
                                         return (freq / 1e6).toFixed(4) + ' MHz';
-                                    } else if (freq >= 1e3) {
+                                    } else if (Math.abs(freq) >= 1e3) {
                                         return (freq / 1e3).toFixed(4) + ' kHz';
                                     }
                                     return freq + ' Hz';
@@ -1170,6 +1170,7 @@
             // 可以实现一个通知系统
             alert(message);
         }
+        
     </script>
 </body>
 </html>

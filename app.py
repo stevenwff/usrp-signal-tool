@@ -232,7 +232,7 @@ def c_record_thread_func(params):
         if not filename.endswith(('.iq', '.bin', '.dat')):
             filename += '.iq'
         full_path = os.path.join(RECORD_FOLDER, filename)
-        
+
         # 构建C程序命令参数
         args = [
             RX_C_PROGRAM,
@@ -244,33 +244,42 @@ def c_record_thread_func(params):
             f"--channel={params.get('channel', DEFAULT_CHANNEL)}",
             f"--file={full_path}"
         ]
-        
+
         app.logger.info(f"启动C录制程序: {' '.join(args)}")
-        
-        # 启动C程序进程
+
+        # ✅ 启动C程序进程（无缓冲 + 实时读取）
         app_state['record_process'] = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            bufsize=1  # 行缓冲
         )
-        
-        # 实时读取输出日志
-        for line in app_state['record_process'].stdout:
-            app.logger.info(f"RX_C: {line.strip()}")
+
+        # ✅ 实时读取输出
+        # 每隔100ms读取一次，避免阻塞
+        while True:
             if app_state['stop_event'].is_set():
                 break
-        
-        # 等待进程结束
+            try:
+                chunk = app_state['record_process'].stdout.read(128)
+                if not chunk:
+                    break
+                app.logger.info(f"[RX_C] {chunk.strip()}")
+            except:
+                break
+
+
+        # ✅ 等待进程结束
         app_state['record_process'].wait()
-        
+
         if app_state['record_process'].returncode == 0:
             app.logger.info(f"C程序录制完成，文件保存至: {full_path}")
         else:
             app.logger.error(f"C程序录制失败，返回码: {app_state['record_process'].returncode}")
             if os.path.exists(full_path):
                 os.remove(full_path)  # 删除不完整文件
-                
+
     except Exception as e:
         app.logger.error(f"C程序录制错误: {str(e)}")
     finally:
@@ -278,6 +287,7 @@ def c_record_thread_func(params):
         app_state['stop_event'].clear()
         app_state['record_thread'] = None
         app_state['record_process'] = None
+
 
 # 原有发送线程函数
 def transmit_thread_func(params):
@@ -465,7 +475,7 @@ def transmit_thread_func(params):
         app_state['transmit_thread'] = None
         app_state['transmission_progress'] = 0
 
-# 调用C程序的发送线程函数（带时间计算）
+# 调用 C 程序的发送线程函数（实时读取 stdout）
 def c_transmit_thread_func(params):
     app_state['transmission_progress'] = 0
     # 初始化时间跟踪
@@ -474,42 +484,37 @@ def c_transmit_thread_func(params):
         'total': 0,
         'sent_samples': 0
     }
-    
+
     try:
         filename = params['filename']
         full_path = None
-        
-        # 查找文件
+
+        # 1. 查找文件（保持原有逻辑）
         possible_paths = [
             os.path.join(RECORD_FOLDER, filename),
             os.path.join(UPLOAD_FOLDER, filename)
         ]
-        
         if not any(filename.endswith(ext) for ext in ('.iq', '.bin', '.dat')):
             for ext in ('.iq', '.bin', '.dat'):
                 possible_paths.insert(0, os.path.join(RECORD_FOLDER, filename + ext))
                 possible_paths.append(os.path.join(UPLOAD_FOLDER, filename + ext))
-        
-        app.logger.debug(f"查找文件 {filename}，检查路径: {possible_paths}")
-        
+
         for path in possible_paths:
             if os.path.exists(path) and os.path.isfile(path):
                 full_path = path
-                app.logger.debug(f"找到文件: {full_path}")
                 break
-        
-        if not full_path or not os.path.exists(full_path):
+        if not full_path:
             app.logger.error(f"文件未找到: {filename}")
             return
-        
- # 获取文件信息和计算总时长
+
+        # 2. 计算总时长（保持原有逻辑）
         file_size = os.path.getsize(full_path)
         total_samples = file_size // 4
         sample_rate = params.get('sample_rate', DEFAULT_SAMPLE_RATE)
-        total_duration = total_samples / sample_rate  # 总时长（秒）
+        total_duration = total_samples / sample_rate
         app_state['transmission_time']['total'] = total_duration
-        
-        # 构建C程序命令参数（保持不变）
+
+        # 3. 构建 C 程序命令参数
         args = [
             TX_C_PROGRAM,
             f"--args={params['device_id'] or ''}",
@@ -519,68 +524,67 @@ def c_transmit_thread_func(params):
             f"--channel={params.get('channel', DEFAULT_CHANNEL)}",
             f"--file={full_path}"
         ]
-        
-        # 记录发送开始时间
-        app_state['transmission_start_time'] = time.time()
-        
-        # 启动定时更新进度的线程
-        def update_progress_periodically():
-            # 每秒更新一次进度
-            while app_state['transmitting'] and not app_state['stop_event'].is_set():
-                elapsed = time.time() - app_state['transmission_start_time']
-                # 计算进度（不超过100%）
-                if total_duration > 0:
-                    progress = min(100, (elapsed / total_duration) * 100)
-                    app_state['transmission_progress'] = progress
-                    app_state['transmission_time']['elapsed'] = elapsed
-                    app_state['transmission_time']['sent_samples'] = min(
-                        total_samples, int((elapsed / total_duration) * total_samples)
-                    )
-                # 等待1秒
-                time.sleep(1)
-        
-        # 启动进度更新线程
-        app_state['transmission_timer'] = threading.Thread(target=update_progress_periodically)
-        app_state['transmission_timer'].daemon = True
-        app_state['transmission_timer'].start()
-        
-        # 启动C程序进程（保持不变）
+        app.logger.info(f"启动C发送程序: {' '.join(args)}")
+
+        # 4. 启动进程（无缓冲 + 实时读取）
         app_state['transmit_process'] = subprocess.Popen(
             args,
             stdout=subprocess.PIPE,
             stderr=subprocess.STDOUT,
-            text=True
+            text=True,
+            bufsize=1          # 行缓冲
         )
-        
-        # 读取C程序输出（保持不变）
-        for line in app_state['transmit_process'].stdout:
-            app.logger.info(f"TX_C: {line.strip()}")
+
+        # 5. 启动后台进度计时器（保持原有逻辑）
+        app_state['transmission_start_time'] = time.time()
+
+        def update_progress_periodically():
+            while app_state['transmitting'] and not app_state['stop_event'].is_set():
+                elapsed = time.time() - app_state['transmission_start_time']
+                progress = min(100, (elapsed / total_duration) * 100) if total_duration else 0
+                app_state['transmission_progress'] = progress
+                app_state['transmission_time']['elapsed'] = elapsed
+                app_state['transmission_time']['sent_samples'] = min(
+                    total_samples,
+                    int((elapsed / total_duration) * total_samples)
+                )
+                time.sleep(1)
+
+        app_state['transmission_timer'] = threading.Thread(target=update_progress_periodically, daemon=True)
+        app_state['transmission_timer'].start()
+
+        # 每隔100ms读取一次，避免阻塞
+        while True:
             if app_state['stop_event'].is_set():
                 break
-        
-        # 等待进程结束
+            try:
+                chunk = app_state['transmit_process'].stdout.read(128)
+                if not chunk:
+                    break
+                app.logger.info(f"[TX_C] {chunk.strip()}")
+            except:
+                break            
+
+        # 7. 等待进程结束
         app_state['transmit_process'].wait()
-        
-        # 发送完成处理
+
         if app_state['transmit_process'].returncode == 0:
             app.logger.info(f"C程序发送完成，文件: {full_path}")
-            # 强制进度为100%
             app_state['transmission_progress'] = 100
-            app_state['transmission_time']['elapsed'] = time.time() - app_state['transmission_start_time']
-            app_state['transmission_time']['sent_samples'] = total_samples
         else:
             app.logger.error(f"C程序发送失败，返回码: {app_state['transmit_process'].returncode}")
-                
+
     except Exception as e:
         app.logger.error(f"C程序发送错误: {str(e)}")
     finally:
-        # 清理计时器线程
+        # 清理
         if app_state['transmission_timer']:
             app_state['transmission_timer'] = None
         app_state['transmitting'] = False
         app_state['stop_event'].clear()
         app_state['transmit_thread'] = None
         app_state['transmit_process'] = None
+
 
 # API 路由
 @app.route('/')
@@ -841,8 +845,8 @@ def generate_spectrum():
         if not full_path:
             return jsonify({'status': 'error', 'message': f'File {filename} not found'})
         
-        # 读取IQ文件（只读取前1MB数据用于频谱分析，避免内存占用过大）
-        max_bytes = 1024 * 1024  # 1MB
+        # 读取IQ文件（只读取前250ms数据用于频谱分析，避免内存占用过大）
+        max_bytes = sample_rate  # 250ms
         file_size = os.path.getsize(full_path)
         read_bytes = min(max_bytes, file_size)
         
@@ -854,19 +858,20 @@ def generate_spectrum():
         iq_samples = iq_samples.astype(np.complex64) / 32768.0  # 归一化
         
         # 计算FFT
-        n = len(iq_samples)
+        n = len(iq_samples)        
         fft_result = fft(iq_samples, n)
-        fft_result = fftshift(fft_result)
+        fft_result = fftshift(fft_result) 
         
-        # 计算频率轴
-        frequencies = np.linspace(-sample_rate/2, sample_rate/2, n)
+        nsamples_display = n
+        while nsamples_display>1000:
+            nsamples_display = nsamples_display // 2
+        frequencies = np.linspace(-sample_rate/2, sample_rate/2, nsamples_display).tolist()
         
         # 计算幅度（dB）
         amplitudes = 20 * np.log10(np.abs(fft_result) + 1e-10)  # 加小值避免log(0)
         
         # 降采样以减少数据点数量，加快前端渲染
-        downsample_factor = max(1, n // 1000)  # 最多1000个点
-        frequencies = frequencies[::downsample_factor].tolist()
+        downsample_factor = max(1, n // nsamples_display)  # 最多1000个点        
         amplitudes = amplitudes[::downsample_factor].tolist()
         
         return jsonify({
