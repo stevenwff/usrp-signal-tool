@@ -63,6 +63,39 @@ app_state = {
     'usrp_status_msg': ''
 }
 
+USRP_GAIN_LIMITS = {
+    # USB 系列
+    "B200":   {"tx": 89.8, "rx": 73.0},
+    "B210":   {"tx": 89.8, "rx": 73.0},
+    "B200mini": {"tx": 89.8, "rx": 73.0},
+    "B205mini": {"tx": 89.8, "rx": 73.0},
+
+    # 网口 N 系列
+    "N200":   {"tx": 31.5, "rx": 31.5},   # 取决于子板
+    "N210":   {"tx": 31.5, "rx": 31.5},
+
+    # 网口 N3 系列
+    "N300":   {"tx": 31.5, "rx": 31.5},
+    "N310":   {"tx": 31.5, "rx": 31.5},
+    "N320":   {"tx": 31.5, "rx": 31.5},
+    "N321":   {"tx": 31.5, "rx": 31.5},
+
+    # X 系列
+    "X300":   {"tx": 31.5, "rx": 31.5},
+    "X310":   {"tx": 31.5, "rx": 31.5},
+    "X410":   {"tx": 60.0, "rx": 60.0},
+    "X440":   {"tx": 60.0, "rx": 60.0},
+
+    # 嵌入式 E 系列
+    "E310":   {"tx": 89.8, "rx": 73.0},
+    "E312":   {"tx": 89.8, "rx": 73.0},
+    "E313":   {"tx": 89.8, "rx": 73.0},
+    "E320":   {"tx": 60.0, "rx": 60.0},
+
+    # 一体化 USRP-2974
+    "USRP-2974": {"tx": 31.5, "rx": 31.5}
+}
+
 # 设备地址模式
 common_addresses = [
     " ",  # 默认地址
@@ -103,7 +136,9 @@ def discover_devices():
                 "id": dev_identifier,
                 "type": dev_type,
                 "serial": model,
-                "ip": addr_str.split("=")[1] if addr_str.startswith("ip=") else "unknown"
+                "ip": addr_str.split("=")[1] if addr_str.startswith("ip=") else "unknown",
+                "max_tx_gain": USRP_GAIN_LIMITS.get(model, {}).get("tx", 80),
+                "max_rx_gain": USRP_GAIN_LIMITS.get(model, {}).get("rx", 80)
             }
             
             devices.append(device)

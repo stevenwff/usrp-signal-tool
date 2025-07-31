@@ -192,7 +192,7 @@
                                     </div>
                                     <div class="param-group">
                                         <label for="record-gain" class="form-label">Gain (dB)</label>
-                                        <input type="number" class="form-control" id="record-gain" value="50" min="0" max="70" step="10" required>
+                                        <input type="number" class="form-control" id="record-gain" value="50" min="0" max="70" step="5" required>
                                     </div>
                                     <div class="param-group">
                                         <label for="record-channel" class="form-label">Channel</label>
@@ -250,7 +250,7 @@
                                     </div>
                                     <div class="param-group">
                                         <label for="transmit-gain" class="form-label">Gain (dB)</label>
-                                        <input type="number" class="form-control" id="transmit-gain" value="70" min="0" max="70" step="10" required>
+                                        <input type="number" class="form-control" id="transmit-gain" value="70" min="0" max="90" step="5" required>
                                     </div>
                                     <div class="param-group">
                                         <label for="transmit-channel" class="form-label">Channel</label>
@@ -399,6 +399,7 @@
         document.addEventListener('DOMContentLoaded', function() {
             // 初始化设备列表
             refreshDevices();
+            updateGainInputs();
             
             // 初始化文件列表
             refreshFileLists();
@@ -474,6 +475,10 @@
                                 </button>
                             </div>
                         `;
+
+                        // 把最大增益写到全局
+                        window.maxRxGain = device.max_rx_gain;
+                        window.maxTxGain = device.max_tx_gain;
                         
                         item.innerHTML = deviceInfo;
                         deviceList.appendChild(item);
@@ -510,6 +515,7 @@
                 if (data.status === 'success') {
                     appState.selectedDevice = data.selected;
                     refreshDevices();
+                    updateGainInputs();
                 } else {
                     alert('Failed to select device: ' + (data.message || 'Unknown error'));
                 }
@@ -621,6 +627,19 @@
                 return;
             }
 
+            const gainInput = document.getElementById('record-gain');
+            const max = parseFloat(gainInput.max);
+            const min = parseFloat(gainInput.min);
+            let gain = parseFloat(gainInput.value);
+            if (gain > max) {
+                gain = max;        // 自动设为最大值
+                gainInput.value = max;
+            }
+            if (gain < min) {
+                gain = min;        // 自动设为最大值
+                gainInput.value = min;
+            }   
+
             // 计算所需空间
             const requiredMB = calculateRecordSize();
             // 检查存储空间
@@ -677,6 +696,19 @@
                 alert('Please select a device first');
                 return;
             }
+
+            const gainInput = document.getElementById('transmit-gain');
+            const max = parseFloat(gainInput.max);
+            const min = parseFloat(gainInput.min);
+            let gain = parseFloat(gainInput.value);
+            if (gain > max) {
+                gain = max;        // 自动设为最大值
+                gainInput.value = max;
+            }
+            if (gain < min) {
+                gain = min;        // 自动设为最大值
+                gainInput.value = min;
+            }             
             
             const filename = document.getElementById('transmit-filename').value;
             if (!filename) {
@@ -1168,7 +1200,46 @@
                 document.getElementById('usrp-msg').textContent = '通信中断';
                 });
             }
-            setInterval(pollUsrpStatus, 200);   // 每 500 ms 刷新        
+            setInterval(pollUsrpStatus, 200);   // 每 500 ms 刷新
+
+        // 更新增益输入框的函数
+        function updateGainInputs() {
+            // 更新录制增益输入框
+            const recordGainInput = document.getElementById('record-gain');
+            if (recordGainInput) {
+                recordGainInput.min = "0";
+                recordGainInput.max = window.maxRxGain || "70";
+                recordGainInput.step = "5";
+                //adjustInputToStep(recordGainInput);
+            }
+            
+            // 更新发送增益输入框
+            const transmitGainInput = document.getElementById('transmit-gain');
+            if (transmitGainInput) {
+                transmitGainInput.min = "0";
+                transmitGainInput.max = window.maxTxGain || "70";
+                transmitGainInput.step = "5";
+                //adjustInputToStep(transmitGainInput);
+            }
+        }
+
+        // 调整输入值到最近的步长倍数，并确保不超过最大值
+        function adjustInputToStep(input) {
+            const maxValue = parseFloat(input.max);
+            const stepValue = parseFloat(input.step);
+            let currentValue = parseFloat(input.value);
+            
+            // 将当前值调整到最近的步长倍数
+            currentValue = stepValue * Math.round(currentValue / stepValue);
+            
+            // 确保调整后的值不超过最大值
+            if (currentValue > maxValue) {
+                currentValue = maxValue;
+            }
+            
+            // 更新输入框的值
+            input.value = currentValue;
+        }
     </script>
 </body>
 </html>
