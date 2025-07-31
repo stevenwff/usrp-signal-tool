@@ -760,7 +760,6 @@ def stop_transmission():
     return jsonify({'status': 'success', 'message': 'Transmission stopped'})
 
 @app.route('/api/files')
-@app.route('/api/files')
 def get_files():
     uploads = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
     # 获取录制文件及其修改时间
