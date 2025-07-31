@@ -760,12 +760,26 @@ def stop_transmission():
     return jsonify({'status': 'success', 'message': 'Transmission stopped'})
 
 @app.route('/api/files')
+@app.route('/api/files')
 def get_files():
     uploads = [f for f in os.listdir(UPLOAD_FOLDER) if os.path.isfile(os.path.join(UPLOAD_FOLDER, f))]
-    records = [f for f in os.listdir(RECORD_FOLDER) if os.path.isfile(os.path.join(RECORD_FOLDER, f))]
+    # 获取录制文件及其修改时间
+    records = [
+        {
+            'name': f,
+            'time': os.path.getmtime(os.path.join(RECORD_FOLDER, f))
+        }
+        for f in os.listdir(RECORD_FOLDER)
+        if os.path.isfile(os.path.join(RECORD_FOLDER, f))
+    ]
+    # 按时间排序（最新的在前）
+    records.sort(key=lambda x: x['time'], reverse=True)
+    # 提取排序后的文件名
+    sorted_records = [item['name'] for item in records]
+    
     return jsonify({
         'uploads': uploads,
-        'records': records
+        'records': sorted_records
     })
 
 @app.route('/api/upload', methods=['POST'])
