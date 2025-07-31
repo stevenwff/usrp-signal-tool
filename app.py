@@ -11,6 +11,7 @@ import shutil
 from uhd import usrp
 from scipy.fft import fft, fftshift
 import math
+import socket
 import select, errno
 
 # 创建Flask应用实例
@@ -24,6 +25,7 @@ os.makedirs(UPLOAD_FOLDER, exist_ok=True)
 os.makedirs(RECORD_FOLDER, exist_ok=True)
 
 # C程序路径
+RX_UDP_C_PROGRAM = "/usr/lib/uhd/examples/rx_samples_to_udp"
 RX_C_PROGRAM = "/usr/lib/uhd/examples/rx_samples_to_file"
 TX_C_PROGRAM = "/usr/lib/uhd/examples/tx_samples_from_file"
 
@@ -44,7 +46,7 @@ PROGRESS_LOG_INTERVAL = 10  # 每10%进度记录一次日志
 # 全局状态
 app_state = {
     'recording': False,
-    'transmitting': False,
+    'transmitting': False,    
     'selected_device': None,
     'record_thread': None,
     'transmit_thread': None,
@@ -319,8 +321,7 @@ def c_record_thread_func(params):
                     pass
             else:
                 app_state['usrp_status'] = 'OK'
-                app_state['usrp_status_msg'] = ''    
-
+                app_state['usrp_status_msg'] = ''
 
         # ✅ 等待进程结束
         app_state['record_process'].wait()
@@ -698,6 +699,7 @@ def get_status():
     return jsonify({
         'recording': app_state['recording'],
         'transmitting': app_state['transmitting'],
+        'capturing': app_state['capturing'],
         'selected_device': app_state['selected_device'],
         'transmission_progress': app_state['transmission_progress']
     })
@@ -974,6 +976,110 @@ def get_usrp_status():
         'status': app_state['usrp_status'],  # OK / O / U / LOST
         'msg':    app_state['usrp_status_msg']
     })        
+
+REALTIME_SERVER = '127.0.0.1'      # UDP 接收IP
+REALTIME_UDP_PORT = 12345          # UDP 接收端口
+REALTIME_MAX_PKT  = 8192           # 每个 UDP 包最大字节数
+REALTIME_NFFT     = 2048           # FFT 点数（可调）
+
+app_state['rt_proc']     = None    # rx_samples_to_udp 进程
+app_state['rt_thread']   = None    # 接收/计算线程
+app_state['capturing']  = False   # 运行标志
+app_state['rt_last_fft'] = None    # 缓存最近一次 FFT 结果
+
+# -------------------------------------------------
+# 启动实时频谱采集线程
+def rt_spectrum_thread(params):
+    """
+    params = {
+        'freq', 'rate', 'gain', 'channel', 'bw', 'device_id'
+    }
+    """
+    if app_state['rt_proc']:
+        try:
+            app_state['rt_proc'].terminate()
+            app_state['rt_proc'].wait(timeout=2)
+        except:
+            pass   # 忽略异常
+
+    # 通道 → subdev 映射（B210 双通道）
+    subdev_map = ["A:A", "A:B"]
+    subdev = subdev_map[int(params['channel']) % 2]
+
+    # 启动 rx_samples_to_udp
+    cmd = [
+        RX_UDP_C_PROGRAM,
+        # f"--args=type=b200",
+        f"--args={params['device_id'] or ''}",
+        f"--freq={params['freq']}",
+        f"--rate={params['rate']}",
+        f"--gain={params['gain']}",
+        f"--bw={params['bw']}",
+        f"--subdev={subdev}",
+        f"--addr={REALTIME_SERVER}",   # 127.0.0.1
+        f"--port={REALTIME_UDP_PORT}", # 12345
+        "--nsamps=200000000"
+    ]
+    app.logger.info("RT cmd: " + " ".join(cmd))
+    app_state['rt_proc'] = subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
+    # 打开 UDP socket 收包
+    sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    sock.bind(('127.0.0.1', REALTIME_UDP_PORT))
+    sock.settimeout(0.5)
+
+    while app_state['capturing'] and app_state['rt_proc'].poll() is None:
+        try:
+            data, _ = sock.recvfrom(REALTIME_MAX_PKT)
+        except socket.timeout:
+            continue
+
+        # 每包假设为连续的 fc32（4 字节 float I + 4 字节 float Q）
+        n = len(data) // 8
+        iq = np.frombuffer(data, dtype=np.complex64, count=n)
+
+        # 做 FFT
+        fft_data = np.fft.fftshift(np.fft.fft(iq, n=REALTIME_NFFT))
+        psd = 20 * np.log10(np.abs(fft_data) + 1e-12)
+        freqs = (np.arange(-REALTIME_NFFT//2, REALTIME_NFFT//2) * (float(params['rate']) / REALTIME_NFFT)).tolist()
+
+        app_state['rt_last_fft'] = {'freqs': freqs, 'psd': psd.tolist()}
+
+    sock.close()
+    if app_state['rt_proc']:
+        app_state['rt_proc'].terminate()
+        app_state['rt_proc'].wait()
+    app_state['rt_proc'] = None
+    app_state['rt_thread'] = None
+    app_state['capturing'] = False
+
+# -------------------------------------------------
+# REST API
+@app.route('/api/rt-start', methods=['POST'])
+def rt_start():
+    if app_state['capturing']:
+        return jsonify({'status': 'error', 'msg': 'Already running'})
+    data = request.json
+    app_state['capturing'] = True
+    app_state['rt_thread'] = threading.Thread(target=rt_spectrum_thread, args=(data,))
+    app_state['rt_thread'].start()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/rt-stop', methods=['POST'])
+def rt_stop():
+    app_state['capturing'] = False
+    if app_state['rt_proc']:
+        app_state['rt_proc'].terminate()
+    return jsonify({'status': 'ok'})
+
+@app.route('/api/rt-spectrum')
+def rt_spectrum():
+    if app_state['rt_last_fft'] is None:
+        return jsonify({'status': 'no-data'})
+    return jsonify(app_state['rt_last_fft'])
+
+
+
 
 if __name__ == '__main__':
     app.run(host='0.0.0.0', port=5000, debug=True, threaded=True)

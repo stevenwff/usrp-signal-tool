@@ -158,6 +158,11 @@
                     <i class="bi bi-bar-chart"></i> Spectrum Analyzer
                 </button>
             </li>
+            <li class="nav-item" role="presentation">
+            <button class="nav-link" id="rt-spectrum-tab" data-bs-toggle="tab" data-bs-target="#rt-spectrum" type="button">
+                <i class="bi bi-speedometer2"></i> Realtime Capture
+            </button>
+            </li>
         </ul>
 
         <div class="tab-content" id="operation-tabs-content">
@@ -379,6 +384,46 @@
                     </div>
                 </div>
             </div>
+            <div class="tab-pane fade" id="rt-spectrum" role="tabpanel">
+                <div class="card mt-3">
+                    <div class="card-header bg-success text-white">
+                    <h2 class="h5 mb-0">实时频谱采集</h2>
+                    </div>
+                    <div class="card-body">
+                    <div class="row">
+                        <div class="col-md-3">
+                        <label class="form-label">Frequency (Hz) (Hz)</label>
+                        <input type="number" class="form-control" id="rt-freq" value="634000000" step="1000000">
+                        </div>
+                        <div class="col-md-3">
+                        <label class="form-label">sampleRate (Sa/s)</label>
+                        <input type="number" class="form-control" id="rt-rate" value="15360000" step="1000000">
+                        </div>
+                        <div class="col-md-2">
+                        <label class="form-label">Gain (dB)</label>
+                        <input type="number" class="form-control" id="rt-gain" value="70" min="0" max="70">
+                        </div>
+                        <div class="col-md-2">
+                        <label class="form-label">Bandwidth (Hz)</label>
+                        <input type="number" class="form-control" id="rt-bw" value="12000000">
+                        </div>
+                        <div class="col-md-2">
+                        <label class="form-label">Channel</label>
+                        <input type="number" class="form-control" id="rt-chan" value="0" min="0" max="1">
+                        </div>
+                    </div>
+
+                    <div class="mt-3">
+                        <button id="rt-start-btn" class="btn btn-success me-2">Start Capturing</button>
+                        <button id="rt-stop-btn"  class="btn btn-danger" disabled>Stop Capturing</button>
+                    </div>
+
+                    <div id="rt-chart-container" style="height:400px; margin-top:20px; border:1px solid #ddd">
+                        <canvas id="rt-canvas"></canvas>
+                    </div>
+                </div>
+                </div>
+            </div>
         </div>
     </div>
     <script>
@@ -530,10 +575,12 @@
                 .then(data => {
                     // 保存之前的录制状态用于判断状态变化
                     const wasRecording = appState.recording;
+                    const wascapturing = appState.capturing;
                     
                     appState.recording = data.recording;
                     appState.transmitting = data.transmitting;
                     appState.selectedDevice = data.selected_device;
+                    appState.capturing = data.capturing;
                     
                     // 更新状态显示
                     const statusText = document.getElementById('status-text');
@@ -548,18 +595,25 @@
                         statusText.textContent = 'Transmitting in progress...';
                         systemStatus.className = 'alert alert-warning mt-3';
                         activityIndicator.style.display = 'inline-block';
+                    } else if (appState.capturing) {
+                        statusText.textContent = 'Capturing in progress...';
+                        systemStatus.className = 'alert alert-info mt-3';
+                        activityIndicator.style.display = 'inline-block';
                     } else {
                         statusText.textContent = 'Ready';
                         systemStatus.className = 'alert alert-info mt-3';
                         activityIndicator.style.display = 'none';
                     }
-                    
+
                     // 更新按钮状态
                     document.getElementById('start-record').disabled = appState.recording || appState.transmitting || !appState.selectedDevice;
                     document.getElementById('stop-record').disabled = !appState.recording;
                     
                     document.getElementById('start-transmit').disabled = appState.transmitting || appState.recording || !appState.selectedDevice;
                     document.getElementById('stop-transmit').disabled = !appState.transmitting;
+
+                    document.getElementById('rt-start-btn').disabled = appState.recording || appState.transmitting || appState.capturing || !appState.selectedDevice;
+                    document.getElementById('rt-stop-btn').disabled = !appState.capturing;
                     
                     // 控制进度容器显示
                     const progressContainer = document.getElementById('transmit-progress-container');
@@ -1217,7 +1271,7 @@
             const transmitGainInput = document.getElementById('transmit-gain');
             if (transmitGainInput) {
                 transmitGainInput.min = "0";
-                transmitGainInput.max = window.maxTxGain || "70";
+                transmitGainInput.max = window.maxTxGain || "90";
                 transmitGainInput.step = "5";
                 //adjustInputToStep(transmitGainInput);
             }
@@ -1240,6 +1294,130 @@
             // 更新输入框的值
             input.value = currentValue;
         }
+
+        // ---------------- 实时频谱 ----------------
+        let rtChart = null;
+        const rtCtx = document.createElement('canvas').getContext('2d');
+        document.getElementById('rt-canvas').replaceWith(rtCtx.canvas);
+
+        document.getElementById('rt-start-btn').onclick = () => {
+        const params = {
+            freq: parseFloat(document.getElementById('rt-freq').value),
+            rate: parseFloat(document.getElementById('rt-rate').value),
+            gain: parseFloat(document.getElementById('rt-gain').value),
+            bw: parseFloat(document.getElementById('rt-bw').value),
+            channel: parseInt(document.getElementById('rt-chan').value),
+            device_id: appState.selectedDevice
+        };
+        fetch('/api/rt-start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params)})
+            .then(r=>r.json()).then(()=>{toggleRtBtns(true); pollRtSpectrum();});
+        };
+
+        document.getElementById('rt-stop-btn').onclick = () => {
+        fetch('/api/rt-stop', {method:'POST'}).then(()=>toggleRtBtns(false));
+        };
+
+        function toggleRtBtns(running){
+        document.getElementById('rt-start-btn').disabled = running;
+        document.getElementById('rt-stop-btn').disabled  = !running;
+        }
+
+        function pollRtSpectrum(){
+        if(!document.getElementById('rt-spectrum').classList.contains('active')) return;
+        fetch('/api/rt-spectrum').then(r=>r.json()).then(data=>{
+            if(data.status !== 'no-data'){
+            drawRtSpectrum(data.freqs, data.psd);
+            }
+            if(document.getElementById('rt-start-btn').disabled) setTimeout(pollRtSpectrum, 200);
+        }).catch(()=>{});
+        }
+
+        // 在 index.html 中替换 drawRtSpectrum 函数
+        function drawRtSpectrum(freqs, psd) {
+            if (!rtChart) {
+                rtChart = new Chart(rtCtx, {
+                    type: 'line',
+                    data: {
+                        labels: freqs,
+                        datasets: [{
+                            label: 'Amplitude (dB)',
+                            data: psd,
+                            borderColor: '#0d6efd',
+                            backgroundColor: 'rgba(13, 110, 253, 0.1)',
+                            borderWidth: 1,
+                            fill: true,
+                            tension: 0.1,
+                            pointRadius: 0
+                        }]
+                    },
+                    options: {
+                        responsive: true,
+                        maintainAspectRatio: false,
+                        scales: {
+                            x: {
+                                title: {
+                                    display: true,
+                                    text: 'Frequency (Hz)',
+                                    font: {
+                                        weight: 'bold'
+                                    }
+                                },
+                                ticks: {
+                                    callback: function(value) {
+                                        const freq = this.getLabelForValue(value);
+                                        if (Math.abs(freq) >= 1e9) {
+                                            return (freq / 1e9).toFixed(1) + ' GHz';
+                                        } else if (Math.abs(freq) >= 1e6) {
+                                            return (freq / 1e6).toFixed(1) + ' MHz';
+                                        } else if (Math.abs(freq) >= 1e3) {
+                                            return (freq / 1e3).toFixed(1) + ' kHz';
+                                        }
+                                        return freq + ' Hz';
+                                    }
+                                }
+                            },
+                            y: {
+                                title: {
+                                    display: true,
+                                    text: 'Amplitude (dB)',
+                                    font: {
+                                        weight: 'bold'
+                                    }
+                                }
+                            }
+                        },
+                        interaction: {
+                            intersect: false,
+                            mode: 'index'
+                        },
+                        plugins: {
+                            tooltip: {
+                                callbacks: {
+                                    title: function(tooltipItems) {
+                                        const freq = tooltipItems[0].label;
+                                        if (Math.abs(freq) >= 1e9) {
+                                            return (freq / 1e9).toFixed(4) + ' GHz';
+                                        } else if (Math.abs(freq) >= 1e6) {
+                                            return (freq / 1e6).toFixed(4) + ' MHz';
+                                        } else if (Math.abs(freq) >= 1e3) {
+                                            return (freq / 1e3).toFixed(4) + ' kHz';
+                                        }
+                                        return freq + ' Hz';
+                                    }
+                                }
+                            }
+                        }
+                    }
+                });
+            } else {
+                rtChart.data.labels = freqs;
+                rtChart.data.datasets[0].data = psd;
+                rtChart.update('none');
+            }
+        }
+
+
+        
     </script>
 </body>
 </html>
