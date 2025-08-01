@@ -13,6 +13,7 @@ from scipy.fft import fft, fftshift
 import math
 import socket
 import select, errno
+import re
 
 # 创建Flask应用实例
 app = Flask(__name__)
@@ -32,7 +33,7 @@ TX_C_PROGRAM = "/usr/lib/uhd/examples/tx_samples_from_file"
 # 默认参数设置
 DEFAULT_FREQUENCY = 634000000  # 634 MHz
 DEFAULT_SAMPLE_RATE = 7000000  # 7 MHz
-DEFAULT_GAIN = 30.0
+DEFAULT_GAIN = 70.0
 DEFAULT_CHANNEL = 0
 
 # 发送配置
@@ -105,54 +106,54 @@ common_addresses = [
 
 # 设备发现
 def discover_devices():
+    try:
+        raw = subprocess.check_output(
+            ["uhd_find_devices"],
+            stderr=subprocess.DEVNULL,
+            text=True,
+            timeout=5
+        )
+    except Exception:
+        return []
+
     devices = []
-    tested_addrs = set()
-    
-    for addr_str in common_addresses:
-        if addr_str in tested_addrs:
+
+    # 以“UHD Device”开头的段就是一台设备
+    # 去掉第一行标题后，用正则把每个完整块切出来
+    pattern = re.compile(
+        r'UHD Device\s*\d+\s*\n'
+        r'(?P<block>.*?)'
+        r'(?=\nUHD Device\s*\d+|\Z)',
+        re.DOTALL
+    )
+    for match in pattern.finditer(raw):
+        blk = match.group('block').strip()
+        if not blk:
             continue
-        tested_addrs.add(addr_str)
-        
-        try:
-            usrp_device = usrp.MultiUSRP(addr_str)
-            
-            dev_type = "USRP Device"
-            dev_identifier = addr_str if addr_str else "default"
-            
-            if addr_str.startswith("type="):
-                dev_type = addr_str.split("=")[1].upper()
-            elif addr_str.startswith("ip="):
-                dev_type = f"USRP at {addr_str.split('=')[1]}"
-                
-            # 获取设备的详细信息
-            pp_string = usrp_device.get_pp_string()
-            
-            # 提取主板型号
-            model = "Unknown"
-            for line in pp_string.split('\n'):
-                if "Mboard 0:" in line:
-                    model = line.split(":")[1].strip()
-                    break
-            
-            device = {
-                "id": dev_identifier,
-                "type": dev_type,
-                "serial": model,
-                "ip": addr_str.split("=")[1] if addr_str.startswith("ip=") else "unknown",
-                "max_tx_gain": USRP_GAIN_LIMITS.get(model, {}).get("tx", 80),
-                "max_rx_gain": USRP_GAIN_LIMITS.get(model, {}).get("rx", 80)
-            }
-            
-            devices.append(device)
-            app.logger.info(f"Found USRP device: {device['type']}")
-            
-            del usrp_device
-            
-        except Exception as e:
-            app.logger.debug(f"Device not found at {addr_str}: {str(e)}")
-            continue
-    
+
+        # 提取键值对
+        info = {}
+        for line in blk.splitlines():
+            if ':' in line:
+                key, val = map(str.strip, line.split(':', 1))
+                info[key.lower()] = val
+
+        # 只要任意字段有值就保留
+        if any(info.values()):
+            max_tx_gain = USRP_GAIN_LIMITS.get(info.get("product", ""), {}).get("tx", 80)
+            max_rx_gain = USRP_GAIN_LIMITS.get(info.get("product", ""), {}).get("rx", 70)
+            devices.append({
+                "serial":  info.get("serial", ""),
+                "name":    info.get("name", ""),
+                "product": info.get("product", ""),
+                "type":    info.get("type", ""),
+                "addr":    info.get("addr", ""),
+                "max_tx_gain": max_tx_gain,
+                "max_rx_gain": max_rx_gain
+            })
+
     return devices
+
 
 # 保存IQ数据
 def save_iq_data(samples, filename, chunk_size=1048576):
@@ -187,7 +188,7 @@ def save_iq_data(samples, filename, chunk_size=1048576):
 # 原有录制线程函数
 def record_thread_func(params):
     try:
-        usrp_args = params['device_id'] if params['device_id'] else ""
+        usrp_args = params['device_serial'] if params['device_serial'] else ""
         usrp_device = usrp.MultiUSRP(usrp_args)
         
         channel = params.get('channel', DEFAULT_CHANNEL)
@@ -276,7 +277,7 @@ def c_record_thread_func(params):
         # 构建C程序命令参数
         args = [
             RX_C_PROGRAM,
-            f"--args={params['device_id'] or ''}",
+            f"--args=serial={params['device_serial']}",
             f"--freq={params['frequency']}",
             f"--rate={params['sample_rate']}",
             f"--gain={params['gain']}",
@@ -393,7 +394,7 @@ def transmit_thread_func(params):
         num_samples = file_size // 4
         app.logger.info(f"文件大小: {file_size} 字节，包含 {num_samples} 个INT16格式IQ样本，准备发送...")
         
-        usrp_args = params['device_id'] if params['device_id'] else ""
+        usrp_args = params['device_serial'] if params['device_serial'] else ""
         app.logger.info(f"使用设备: {usrp_args}")
         
         try:
@@ -579,7 +580,7 @@ def c_transmit_thread_func(params):
         # 3. 构建 C 程序命令参数
         args = [
             TX_C_PROGRAM,
-            f"--args={params['device_id'] or ''}",
+            f"--args=serial={params['device_serial']}",
             f"--freq={params['frequency']}",
             f"--rate={params['sample_rate']}",
             f"--gain={params['gain']}",
@@ -687,11 +688,19 @@ def get_devices():
 @app.route('/api/select-device', methods=['POST'])
 def select_device():
     data = request.json
-    device_id = data.get('device_id')
-    app_state['selected_device'] = device_id
+    device_serial = data.get('device_serial')
+    device_product = data.get('device_product')
+    app_state['selected_device'] = device_serial
+    
+    # 获取设备的最大增益信息
+    max_tx_gain = USRP_GAIN_LIMITS.get(device_product, {}).get("tx", 80)
+    max_rx_gain = USRP_GAIN_LIMITS.get(device_product, {}).get("rx", 70)
+
     return jsonify({
         'status': 'success',
-        'selected': device_id
+        'selected': device_serial,
+        'max_tx_gain': max_tx_gain,
+        'max_rx_gain': max_rx_gain
     })
 
 @app.route('/api/status')
@@ -735,7 +744,7 @@ def start_transmission():
     app_state['transmission_progress'] = 0
     
     params = {
-        'device_id': app_state['selected_device'],
+        'device_serial': app_state['selected_device'],
         'filename': data.get('filename'),
         'frequency': data.get('frequency', DEFAULT_FREQUENCY),
         'sample_rate': data.get('sample_rate', DEFAULT_SAMPLE_RATE),
@@ -898,7 +907,7 @@ def start_recording():
     
     # 原有录制逻辑...
     params = {
-        'device_id': app_state['selected_device'],
+        'device_serial': app_state['selected_device'],
         'filename': data.get('filename', f'record_{int(time.time())}'),
         'frequency': float(data.get('frequency', DEFAULT_FREQUENCY)),
         'duration': float(data.get('duration', 5)),
@@ -1005,7 +1014,7 @@ app_state['rt_last_fft'] = None    # 缓存最近一次 FFT 结果
 def rt_spectrum_thread(params):
     """
     params = {
-        'freq', 'rate', 'gain', 'channel', 'bw', 'device_id'
+        'freq', 'rate', 'gain', 'channel', 'bw', 'device_serial'
     }
     """
     if app_state['rt_proc']:
@@ -1023,7 +1032,7 @@ def rt_spectrum_thread(params):
     cmd = [
         RX_UDP_C_PROGRAM,
         # f"--args=type=b200",
-        f"--args={params['device_id'] or ''}",
+        f"--args=serial={params['device_serial']}",
         f"--freq={params['freq']}",
         f"--rate={params['rate']}",
         f"--gain={params['gain']}",
@@ -1050,11 +1059,13 @@ def rt_spectrum_thread(params):
         # 每包假设为连续的 fc32（4 字节 float I + 4 字节 float Q）
         n = len(data) // 8
         iq = np.frombuffer(data, dtype=np.complex64, count=n)
+        center_freq = params['freq']
 
         # 做 FFT
         fft_data = np.fft.fftshift(np.fft.fft(iq, n=REALTIME_NFFT))
         psd = 20 * np.log10(np.abs(fft_data) + 1e-12)
-        freqs = (np.arange(-REALTIME_NFFT//2, REALTIME_NFFT//2) * (float(params['rate']) / REALTIME_NFFT)).tolist()
+        freqs = (np.arange(-REALTIME_NFFT//2, +REALTIME_NFFT//2) * (float(params['rate']) / REALTIME_NFFT))
+        freqs = (freqs + center_freq).tolist()
 
         app_state['rt_last_fft'] = {'freqs': freqs, 'psd': psd.tolist()}
 

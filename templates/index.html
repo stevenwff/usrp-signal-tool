@@ -97,6 +97,11 @@
         .indicator.ok   { background:green; }
         .indicator.warn { background:red; animation:blink 1s infinite; }
         @keyframes blink { 0%{opacity:1} 50%{opacity:.2} 100%{opacity:1} }
+        .divider::after {
+            content: "|";
+            margin: 0 5px;
+            color: #777;
+        }
     </style>
 </head>
 <body>
@@ -149,19 +154,19 @@
                 </button>
             </li>
             <li class="nav-item" role="presentation">
-                <button class="nav-link" id="files-tab" data-bs-toggle="tab" data-bs-target="#files" type="button" role="tab" aria-controls="files" aria-selected="false">
-                    <i class="bi bi-files"></i> File Management
-                </button>
+            <button class="nav-link" id="rt-spectrum-tab" data-bs-toggle="tab" data-bs-target="#rt-spectrum" type="button">
+                <i class="bi bi-speedometer2"></i> Realtime Capture
+            </button>
             </li>
             <li class="nav-item" role="presentation">
                 <button class="nav-link" id="spectrum-tab" data-bs-toggle="tab" data-bs-target="#spectrum" type="button" role="tab" aria-controls="spectrum" aria-selected="false">
                     <i class="bi bi-bar-chart"></i> Spectrum Analyzer
                 </button>
-            </li>
+            </li>            
             <li class="nav-item" role="presentation">
-            <button class="nav-link" id="rt-spectrum-tab" data-bs-toggle="tab" data-bs-target="#rt-spectrum" type="button">
-                <i class="bi bi-speedometer2"></i> Realtime Capture
-            </button>
+                <button class="nav-link" id="files-tab" data-bs-toggle="tab" data-bs-target="#files" type="button" role="tab" aria-controls="files" aria-selected="false">
+                    <i class="bi bi-files"></i> File Management
+                </button>
             </li>
         </ul>
 
@@ -401,7 +406,7 @@
                         </div>
                         <div class="col-md-2">
                         <label class="form-label">Gain (dB)</label>
-                        <input type="number" class="form-control" id="rt-gain" value="70" min="0" max="70">
+                        <input type="number" class="form-control" id="rt-gain" value="70" min="0" max="70" step=5>
                         </div>
                         <div class="col-md-2">
                         <label class="form-label">Bandwidth (Hz)</label>
@@ -503,27 +508,28 @@
                     
                     data.devices.forEach(device => {
                         const item = document.createElement('div');
-                        item.className = `list-group-item d-flex justify-content-between align-items-center ${device.id === data.selected ? 'list-group-item-primary' : ''}`;
+                        item.className = `list-group-item d-flex justify-content-between align-items-center ${device.serial === data.selected ? 'list-group-item-primary' : ''}`;
                         
                         const deviceInfo = `
                             <div>
-                                <strong>${device.type}</strong> (${device.id})
+                                <strong>${device.type}</strong> (${device.product})
                                 <div class="text-muted small device-info">
-                                    Serial: ${device.serial}
-                                    ${device.ip !== 'unknown' ? `<br>IP: ${device.ip}` : ''}
+                                    <strong>Serial</strong>: ${device.serial}
+                                    <span class="divider"></span>
+                                    <strong>Name</strong>: ${device.name}
+                                    ${device.addr !== '' ? 
+                                        `<span class="divider"></span><strong>IP</strong>: ${device.addr}` : ''}
+                                    <span class="divider"></span>
+                                    <strong>Max Gain</strong>: Tx - ${device.max_tx_gain} dB， Rx - ${device.max_rx_gain} dB
                                 </div>
                             </div>
                             <div class="d-flex align-items-center">
                                 <span class="status-indicator status-connected me-2"></span>
-                                <button class="btn btn-sm btn-outline-primary select-device" data-id="${device.id}">
-                                    ${device.id === data.selected ? 'Selected' : 'Select'}
+                                <button class="btn btn-sm btn-outline-primary select-device" data-serial="${device.serial}" data-product="${device.product}">
+                                    ${device.serial === data.selected ? 'Selected' : 'Select'}
                                 </button>
                             </div>
                         `;
-
-                        // 把最大增益写到全局
-                        window.maxRxGain = device.max_rx_gain;
-                        window.maxTxGain = device.max_tx_gain;
                         
                         item.innerHTML = deviceInfo;
                         deviceList.appendChild(item);
@@ -532,8 +538,9 @@
                     // 添加设备选择事件
                     document.querySelectorAll('.select-device').forEach(button => {
                         button.addEventListener('click', function() {
-                            const deviceId = this.getAttribute('data-id');
-                            selectDevice(deviceId);
+                            const serial = this.getAttribute('data-serial');
+                            const product = this.getAttribute('data-product');
+                            selectDevice(serial, product);
                         });
                     });
                     
@@ -547,20 +554,28 @@
         }
 
         // 选择设备
-        function selectDevice(deviceId) {
+        function selectDevice(serial, product) {
             fetch('/api/select-device', {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json'
                 },
-                body: JSON.stringify({ device_id: deviceId })
+                body: JSON.stringify({ device_serial: serial, device_product: product})
             })
             .then(response => response.json())
             .then(data => {
                 if (data.status === 'success') {
                     appState.selectedDevice = data.selected;
-                    refreshDevices();
+                    appState.maxTxGain = data.max_tx_gain;
+                    appState.maxRxGain = data.max_rx_gain;
+                    
+                    // 把最大增益写到全局
+                    window.maxRxGain = data.max_rx_gain;
+                    window.maxTxGain = data.max_tx_gain;
+                    
                     updateGainInputs();
+                    refreshDevices();
+                    
                 } else {
                     alert('Failed to select device: ' + (data.message || 'Unknown error'));
                 }
@@ -1258,41 +1273,17 @@
 
         // 更新增益输入框的函数
         function updateGainInputs() {
-            // 更新录制增益输入框
-            const recordGainInput = document.getElementById('record-gain');
-            if (recordGainInput) {
-                recordGainInput.min = "0";
-                recordGainInput.max = window.maxRxGain || "70";
-                recordGainInput.step = "5";
-                //adjustInputToStep(recordGainInput);
+            if (appState.maxTxGain) {
+                document.getElementById('transmit-gain').max = appState.maxTxGain;
+                document.getElementById('transmit-gain').value = appState.maxTxGain;
             }
-            
-            // 更新发送增益输入框
-            const transmitGainInput = document.getElementById('transmit-gain');
-            if (transmitGainInput) {
-                transmitGainInput.min = "0";
-                transmitGainInput.max = window.maxTxGain || "90";
-                transmitGainInput.step = "5";
-                //adjustInputToStep(transmitGainInput);
-            }
-        }
+            if (appState.maxRxGain) {
+                document.getElementById('record-gain').value = appState.maxRxGain;
+                document.getElementById('rt-gain').value = appState.maxRxGain;
 
-        // 调整输入值到最近的步长倍数，并确保不超过最大值
-        function adjustInputToStep(input) {
-            const maxValue = parseFloat(input.max);
-            const stepValue = parseFloat(input.step);
-            let currentValue = parseFloat(input.value);
-            
-            // 将当前值调整到最近的步长倍数
-            currentValue = stepValue * Math.round(currentValue / stepValue);
-            
-            // 确保调整后的值不超过最大值
-            if (currentValue > maxValue) {
-                currentValue = maxValue;
+                document.getElementById('record-gain').max = appState.maxRxGain;
+                document.getElementById('rt-gain').max = appState.maxRxGain;
             }
-            
-            // 更新输入框的值
-            input.value = currentValue;
         }
 
         // ---------------- 实时频谱 ----------------
@@ -1307,7 +1298,7 @@
             gain: parseFloat(document.getElementById('rt-gain').value),
             bw: parseFloat(document.getElementById('rt-bw').value),
             channel: parseInt(document.getElementById('rt-chan').value),
-            device_id: appState.selectedDevice
+            device_serial: appState.selectedDevice
         };
         fetch('/api/rt-start', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params)})
             .then(r=>r.json()).then(()=>{toggleRtBtns(true); pollRtSpectrum();});
@@ -1377,6 +1368,8 @@
                                 }
                             },
                             y: {
+                                min: -60,
+                                max: 100,
                                 title: {
                                     display: true,
                                     text: 'Amplitude (dB)',
