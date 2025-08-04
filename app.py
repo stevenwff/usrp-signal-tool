@@ -5,9 +5,7 @@ import numpy as np
 import subprocess
 from flask import Flask, render_template, request, jsonify, send_from_directory
 from flask_cors import CORS
-import uhd
 import shutil
-from uhd import usrp
 from scipy.fft import fft, fftshift
 import socket
 import select
@@ -69,7 +67,6 @@ app_state = {
 
     'usrp_status': 'OK',
     'usrp_status_msg': '',   
-    
     
     'rt_last_fft': None      # 缓存最近一次 FFT 结果
 }
@@ -360,7 +357,7 @@ def c_capture_thread_func(params):
                 continue
             iq = np.frombuffer(data, dtype=np.complex64, count=n)
             center_freq = params['freq']
-            fft_data = np.fft.fftshift(np.fft.fft(iq, n=CAPTURE_NFFT))
+            fft_data = fftshift(fft(iq, n=CAPTURE_NFFT))
             psd = 20 * np.log10(np.abs(fft_data) + 1e-12)
             freqs = (np.arange(-CAPTURE_NFFT//2, CAPTURE_NFFT//2) * (float(params['rate']) / CAPTURE_NFFT))
             freqs = (freqs + center_freq).tolist()
@@ -415,7 +412,7 @@ def get_status():
     return jsonify({
         'recording': app_state['recording'],
         'transmitting': app_state['transmitting'],
-        'capturing': app_state.get('capturing', False),
+        'capturing': app_state['capturing'],
         'selected_device': app_state['selected_device'],
         'transmission_progress': app_state['transmission_progress']
     })
@@ -540,10 +537,13 @@ def start_capturing():
         return jsonify({'status': 'error', 'msg': 'Device is busy'})
     if not app_state['selected_device']:
         return jsonify({'status': 'error', 'msg': 'No device selected'})
-    data = request.json
+    data = request.json or {}
     param = dict(data)
-    if not param.get('device_serial'):
-        param['device_serial'] = app_state['selected_device']
+    param['device_serial'] = app_state['selected_device']
+    # 检查参数完整性
+    for key in ['freq', 'rate', 'gain', 'bw', 'channel']:
+        if key not in param:
+            return jsonify({'status': 'error', 'msg': f'Missing parameter: {key}'})
     app_state['capturing'] = True
     app_state['stop_event'].clear()
     app_state['capture_thread'] = threading.Thread(target=c_capture_thread_func, args=(param,))
@@ -562,9 +562,11 @@ def stop_capturing():
 
 @app.route('/api/capture-spectrum')
 def capture_spectrum():
-    if app_state['rt_last_fft'] is None:
+    # 前端轮询时需要 freq/psd，后端需返回一致结构
+    result = app_state.get('rt_last_fft')
+    if not result or 'freqs' not in result or 'psd' not in result:
         return jsonify({'status': 'no-data'})
-    return jsonify(app_state['rt_last_fft'])
+    return jsonify({'freqs': result['freqs'], 'psd': result['psd']})
 
 # -------------------- 文件管理相关 API（File Management Tab） --------------------
 @app.route('/api/files')

@@ -473,6 +473,9 @@
             document.getElementById('generate-spectrum').addEventListener('click', generateSpectrum);
             document.getElementById('refresh-spectrum').addEventListener('click', generateSpectrum);
             document.getElementById('save-spectrum').addEventListener('click', saveSpectrumImage);
+
+            // 刷新预估文件大小
+            updateRecordSizeHint();
         });
 
         // 设备相关
@@ -804,8 +807,7 @@
                             title: { display: true, text: 'Frequency (Hz)', font: { weight: 'bold' } },
                             ticks: {
                                 callback: function(value) {
-                                    const freq = this.getLabelForValue(value);
-                                    if (Math.abs(freq) >= 1e9) return (freq / 1e9).toFixed(1) + ' GHz';
+                                    const freq = this.getLabelForValue(value);                                    
                                     if (Math.abs(freq) >= 1e6) return (freq / 1e6).toFixed(1) + ' MHz';
                                     if (Math.abs(freq) >= 1e3) return (freq / 1e3).toFixed(1) + ' kHz';
                                     return freq + ' Hz';
@@ -821,8 +823,7 @@
                         tooltip: {
                             callbacks: {
                                 title: function(tooltipItems) {
-                                    const freq = tooltipItems[0].label;
-                                    if (Math.abs(freq) >= 1e9) return (freq / 1e9).toFixed(4) + ' GHz';
+                                    const freq = tooltipItems[0].label;                                    
                                     if (Math.abs(freq) >= 1e6) return (freq / 1e6).toFixed(4) + ' MHz';
                                     if (Math.abs(freq) >= 1e3) return (freq / 1e3).toFixed(4) + ' kHz';
                                     return freq + ' Hz';
@@ -985,24 +986,29 @@
                 bw: parseFloat(document.getElementById('capture-bw').value),
                 channel: parseInt(document.getElementById('capture-chan').value)
             };
-            fetch('/api/start-capturing', {method:'POST', headers:{'Content-Type':'application/json'}, body:JSON.stringify(params)})
-                .then(r=>r.json()).then(()=>{toggleRtBtns(true); pollRtSpectrum();});
+            fetch('/api/start-capturing', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(params)
+            })
+            .then(r => r.json())
+            .then(() => { toggleRtBtns(true); pollRtSpectrum(); });
         };
         document.getElementById('capture-stop-btn').onclick = () => {
-            fetch('/api/stop-capturing', {method:'POST'}).then(()=>toggleRtBtns(false));
+            fetch('/api/stop-capturing', { method: 'POST' }).then(() => toggleRtBtns(false));
         };
-        function toggleRtBtns(running){
+        function toggleRtBtns(running) {
             document.getElementById('capture-start-btn').disabled = running;
-            document.getElementById('capture-stop-btn').disabled  = !running;
+            document.getElementById('capture-stop-btn').disabled = !running;
         }
-        function pollRtSpectrum(){
-            if(!document.getElementById('capture-spectrum').classList.contains('active')) return;
-            fetch('/api/capture-spectrum').then(r=>r.json()).then(data=>{
-                if(data.status !== 'no-data'){
+        function pollRtSpectrum() {
+            if (!document.getElementById('capture-spectrum').classList.contains('active')) return;
+            fetch('/api/capture-spectrum').then(r => r.json()).then(data => {
+                if (data.status !== 'no-data') {
                     drawRtSpectrum(data.freqs, data.psd);
                 }
-                if(document.getElementById('capture-start-btn').disabled) setTimeout(pollRtSpectrum, 200);
-            }).catch(()=>{});
+                if (document.getElementById('capture-start-btn').disabled) setTimeout(pollRtSpectrum, 200);
+            }).catch(() => {});
         }
         function drawRtSpectrum(freqs, psd) {
             if (!rtChart) {
@@ -1029,8 +1035,7 @@
                                 title: { display: true, text: 'Frequency (Hz)', font: { weight: 'bold' } },
                                 ticks: {
                                     callback: function(value) {
-                                        const freq = this.getLabelForValue(value);
-                                        if (Math.abs(freq) >= 1e9) return (freq / 1e9).toFixed(1) + ' GHz';
+                                        const freq = this.getLabelForValue(value);                                        
                                         if (Math.abs(freq) >= 1e6) return (freq / 1e6).toFixed(1) + ' MHz';
                                         if (Math.abs(freq) >= 1e3) return (freq / 1e3).toFixed(1) + ' kHz';
                                         return freq + ' Hz';
@@ -1048,8 +1053,7 @@
                             tooltip: {
                                 callbacks: {
                                     title: function(tooltipItems) {
-                                        const freq = tooltipItems[0].label;
-                                        if (Math.abs(freq) >= 1e9) return (freq / 1e9).toFixed(4) + ' GHz';
+                                        const freq = tooltipItems[0].label;                                        
                                         if (Math.abs(freq) >= 1e6) return (freq / 1e6).toFixed(4) + ' MHz';
                                         if (Math.abs(freq) >= 1e3) return (freq / 1e3).toFixed(4) + ' kHz';
                                         return freq + ' Hz';
